@@ -1,8 +1,8 @@
 /*
  * ALEC — Adaptive Lazy Evolving Compression
- * C/C++ FFI bindings (from alec-ffi crate)
+ * C/C++ FFI bindings (from alec-ffi crate v1.2)
  *
- * Build libalec.a for your target with:
+ * Build libalec.a for nRF9151 (Cortex-M33):
  *   rustup target add thumbv8m.main-none-eabihf
  *   cd alec-ffi && cargo build --release --target thumbv8m.main-none-eabihf
  *   cp target/thumbv8m.main-none-eabihf/release/libalec.a <firmware>/lib/alec/
@@ -49,6 +49,31 @@ AlecEncoder *alec_encoder_new(void);
 AlecEncoder *alec_encoder_new_with_checksum(void);
 void         alec_encoder_free(AlecEncoder *encoder);
 
+/**
+ * Compress raw bytes.
+ *
+ * Matches Rust API: encoder.encode(&raw_bytes, &mut ctx) → Vec<u8>
+ *
+ * @param encoder       Encoder handle (owns internal Context)
+ * @param input         Raw bytes to compress
+ * @param input_len     Length of input
+ * @param output        Buffer for compressed output
+ * @param output_capacity  Size of output buffer
+ * @param output_len    [out] Actual compressed length written
+ * @return ALEC_OK on success
+ */
+AlecResult alec_encode(
+    AlecEncoder   *encoder,
+    const uint8_t *input,
+    size_t         input_len,
+    uint8_t       *output,
+    size_t         output_capacity,
+    size_t        *output_len
+);
+
+/**
+ * Encode a single floating-point sensor value.
+ */
 AlecResult alec_encode_value(
     AlecEncoder *encoder,
     double       value,
@@ -59,6 +84,9 @@ AlecResult alec_encode_value(
     size_t      *output_len
 );
 
+/**
+ * Encode multiple floating-point sensor values.
+ */
 AlecResult alec_encode_multi(
     AlecEncoder   *encoder,
     const double  *values,
@@ -78,8 +106,22 @@ AlecDecoder *alec_decoder_new(void);
 AlecDecoder *alec_decoder_new_with_checksum(void);
 void         alec_decoder_free(AlecDecoder *decoder);
 
+/**
+ * Decompress ALEC-encoded bytes.
+ *
+ * Matches Rust API: decoder.decode(&compressed, &mut ctx) → Vec<u8>
+ */
+AlecResult alec_decode(
+    AlecDecoder   *decoder,
+    const uint8_t *input,
+    size_t         input_len,
+    uint8_t       *output,
+    size_t         output_capacity,
+    size_t        *output_len
+);
+
 AlecResult alec_decode_value(
-    AlecDecoder *decoder,
+    AlecDecoder   *decoder,
     const uint8_t *input,
     size_t         input_len,
     double        *value,
@@ -87,7 +129,7 @@ AlecResult alec_decode_value(
 );
 
 AlecResult alec_decode_multi(
-    AlecDecoder *decoder,
+    AlecDecoder   *decoder,
     const uint8_t *input,
     size_t         input_len,
     double        *values,
