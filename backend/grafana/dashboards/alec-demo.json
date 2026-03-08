@@ -1,0 +1,131 @@
+{
+  "uid": "alec-demo",
+  "title": "ALEC NB-IoT Sensor Demo",
+  "tags": ["alec", "nrf9151", "nbiot"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Compression Ratio Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "alec_compression_ratio",
+          "legendFormat": "ratio (raw/compressed)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": { "fillOpacity": 15, "lineWidth": 2 }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Raw vs Compressed Bytes per Message",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "alec_payload_raw_bytes",
+          "legendFormat": "Raw bytes",
+          "refId": "A"
+        },
+        {
+          "expr": "alec_payload_compressed_bytes",
+          "legendFormat": "Compressed bytes",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes",
+          "min": 0,
+          "custom": { "fillOpacity": 10, "lineWidth": 2 }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Temperature / Humidity / Pressure",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "alec_temperature",
+          "legendFormat": "Temperature (°C)",
+          "refId": "A"
+        },
+        {
+          "expr": "alec_humidity",
+          "legendFormat": "Humidity (%RH)",
+          "refId": "B"
+        },
+        {
+          "expr": "alec_pressure / 1000",
+          "legendFormat": "Pressure (kPa)",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 5, "lineWidth": 2 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Temperature (°C)" },
+            "properties": [{ "id": "unit", "value": "celsius" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Humidity (%RH)" },
+            "properties": [{ "id": "unit", "value": "humidity" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Pressure (kPa)" },
+            "properties": [{ "id": "unit", "value": "pressurekpa" }]
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "title": "Message Count",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        {
+          "expr": "alec_message_count",
+          "legendFormat": "Total messages",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      }
+    }
+  ],
+  "templating": { "list": [] },
+  "annotations": { "list": [] }
+}
