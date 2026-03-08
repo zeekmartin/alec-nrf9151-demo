@@ -3,8 +3,9 @@
 ///! Subscribes to MQTT topic `alec/sensor/demo`, decodes incoming payloads
 ///! (ALEC-compressed or raw), and exposes Prometheus metrics on :9100/metrics.
 
+use alec::{Context, Decoder, EncodedMessage};
 use byteorder::{LittleEndian, ReadBytesExt};
-use log::{error, info, warn};
+use log::{info, warn};
 use prometheus::{Gauge, IntCounter, Registry, TextEncoder};
 use std::io::Cursor;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 //  Sensor payload (mirrors firmware struct sensor_payload, 18 bytes packed)
+//  Used as fallback when receiving uncompressed (raw) messages.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -45,28 +47,28 @@ fn parse_raw(data: &[u8]) -> Option<SensorPayload> {
 }
 
 // ---------------------------------------------------------------------------
-//  ALEC codec stub
-//
-//  When the real `alec-codec` crate is published on crates.io, replace this
-//  module with:
-//      use alec_codec::decode;
-//  The function signature is kept identical for a drop-in swap.
+//  ALEC decoding helpers
 // ---------------------------------------------------------------------------
 
-mod alec_codec {
-    /// Attempt to ALEC-decode `compressed` into a raw byte buffer.
-    /// Returns `None` if the data is not ALEC-compressed.
-    ///
-    /// Stub: always returns None so we fall through to raw parsing.
-    /// Replace with the real crate once available.
-    pub fn decode(compressed: &[u8]) -> Option<Vec<u8>> {
-        // ALEC frames are expected to start with a magic byte (0xA1).
-        // If present, a real decoder would decompress here.
-        if compressed.first().copied() == Some(0xA1) {
-            // TODO: replace with real alec_codec::decode(compressed)
-            log::warn!("ALEC magic detected but stub decoder active — returning raw fallback");
+struct AlecState {
+    decoder: Decoder,
+    context: Context,
+}
+
+impl AlecState {
+    fn new() -> Self {
+        Self {
+            decoder: Decoder::new(),
+            context: Context::new(),
         }
-        None
+    }
+
+    /// Try to decode an ALEC-encoded message from wire bytes.
+    /// Returns (value, timestamp) on success.
+    fn try_decode(&mut self, wire: &[u8]) -> Option<(f64, u64)> {
+        let msg = EncodedMessage::from_bytes(wire).ok()?;
+        let decoded = self.decoder.decode(&msg, &self.context).ok()?;
+        Some((decoded.value, decoded.timestamp))
     }
 }
 
@@ -180,6 +182,11 @@ fn run(broker: &str, topic: &str, metrics: &Metrics) {
         .expect("failed to subscribe to topic");
     info!("Subscribed to {}", topic);
 
+    // Per-field ALEC decoders (firmware encodes each sensor field separately)
+    let mut alec_temp = AlecState::new();
+    let mut alec_hum = AlecState::new();
+    let mut alec_pres = AlecState::new();
+
     for msg in rx.iter() {
         if let Some(msg) = msg {
             let payload = msg.payload();
@@ -187,52 +194,106 @@ fn run(broker: &str, topic: &str, metrics: &Metrics) {
             metrics.message_count.inc();
             metrics.compressed_bytes.set(wire_len as f64);
 
-            // Try ALEC decode first, fallback to raw
-            let raw = match alec_codec::decode(payload) {
-                Some(decoded) => {
-                    metrics.raw_bytes.set(decoded.len() as f64);
-                    if wire_len > 0 {
-                        metrics
-                            .compression_ratio
-                            .set(decoded.len() as f64 / wire_len as f64);
-                    }
-                    decoded
+            // Try ALEC decode first: firmware sends 3 concatenated ALEC messages
+            // (temp + humidity + pressure), each prefixed with a 2-byte length.
+            if let Some(reading) = try_alec_decode(
+                payload,
+                &mut alec_temp,
+                &mut alec_hum,
+                &mut alec_pres,
+            ) {
+                let raw_size = RAW_PAYLOAD_SIZE as f64;
+                metrics.raw_bytes.set(raw_size);
+                if wire_len > 0 {
+                    metrics.compression_ratio.set(raw_size / wire_len as f64);
                 }
-                None => {
-                    // Payload is already raw (uncompressed)
-                    metrics.raw_bytes.set(wire_len as f64);
-                    metrics.compression_ratio.set(1.0);
-                    payload.to_vec()
-                }
-            };
-
-            match parse_raw(&raw) {
-                Some(reading) => {
-                    metrics.temperature.set(reading.temperature_c);
-                    metrics.humidity.set(reading.humidity_rh);
-                    metrics.pressure.set(reading.pressure_pa as f64);
-                    info!(
-                        "seq={} t={:.2}°C rh={:.2}% pa={}Pa wire={}B raw={}B",
-                        reading.sequence,
-                        reading.temperature_c,
-                        reading.humidity_rh,
-                        reading.pressure_pa,
-                        wire_len,
-                        raw.len()
-                    );
-                }
-                None => {
-                    warn!(
-                        "Could not parse payload ({} bytes) — skipping",
-                        raw.len()
-                    );
-                }
+                metrics.temperature.set(reading.temperature_c);
+                metrics.humidity.set(reading.humidity_rh);
+                metrics.pressure.set(reading.pressure_pa as f64);
+                info!(
+                    "ALEC seq=- t={:.2}°C rh={:.2}% pa={}Pa wire={}B raw={}B",
+                    reading.temperature_c,
+                    reading.humidity_rh,
+                    reading.pressure_pa,
+                    wire_len,
+                    RAW_PAYLOAD_SIZE
+                );
+            } else if let Some(reading) = parse_raw(payload) {
+                // Fallback: uncompressed raw binary struct
+                metrics.raw_bytes.set(wire_len as f64);
+                metrics.compression_ratio.set(1.0);
+                metrics.temperature.set(reading.temperature_c);
+                metrics.humidity.set(reading.humidity_rh);
+                metrics.pressure.set(reading.pressure_pa as f64);
+                info!(
+                    "RAW  seq={} t={:.2}°C rh={:.2}% pa={}Pa wire={}B",
+                    reading.sequence,
+                    reading.temperature_c,
+                    reading.humidity_rh,
+                    reading.pressure_pa,
+                    wire_len
+                );
+            } else {
+                warn!(
+                    "Could not parse payload ({} bytes) — skipping",
+                    wire_len
+                );
             }
         } else if !cli.is_connected() {
             warn!("Lost connection — waiting for reconnect...");
             std::thread::sleep(Duration::from_secs(1));
         }
     }
+}
+
+/// Attempt to decode an ALEC multi-field payload.
+///
+/// Wire format from firmware:
+///   [u16 len_a][alec_msg_a][u16 len_b][alec_msg_b][u16 len_c][alec_msg_c]
+///
+/// Each alec_msg is the output of alec_encode_value() (EncodedMessage::to_bytes()).
+/// Fields in order: temperature (°C×100 as f64), humidity (%RH×100 as f64), pressure (Pa as f64).
+fn try_alec_decode(
+    payload: &[u8],
+    alec_temp: &mut AlecState,
+    alec_hum: &mut AlecState,
+    alec_pres: &mut AlecState,
+) -> Option<SensorPayload> {
+    let mut cur = Cursor::new(payload);
+
+    // Read temperature message
+    let len_t = cur.read_u16::<LittleEndian>().ok()? as usize;
+    let pos = cur.position() as usize;
+    if pos + len_t > payload.len() {
+        return None;
+    }
+    let (temp_val, _) = alec_temp.try_decode(&payload[pos..pos + len_t])?;
+    cur.set_position((pos + len_t) as u64);
+
+    // Read humidity message
+    let len_h = cur.read_u16::<LittleEndian>().ok()? as usize;
+    let pos = cur.position() as usize;
+    if pos + len_h > payload.len() {
+        return None;
+    }
+    let (hum_val, _) = alec_hum.try_decode(&payload[pos..pos + len_h])?;
+    cur.set_position((pos + len_h) as u64);
+
+    // Read pressure message
+    let len_p = cur.read_u16::<LittleEndian>().ok()? as usize;
+    let pos = cur.position() as usize;
+    if pos + len_p > payload.len() {
+        return None;
+    }
+    let (pres_val, _) = alec_pres.try_decode(&payload[pos..pos + len_p])?;
+
+    Some(SensorPayload {
+        temperature_c: temp_val / 100.0,
+        humidity_rh: hum_val / 100.0,
+        pressure_pa: pres_val as u32,
+        timestamp_ms: 0,
+        sequence: 0,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +309,8 @@ fn main() {
         .unwrap_or_else(|_| "9100".into())
         .parse()
         .expect("METRICS_PORT must be a u16");
+
+    info!("ALEC Decoder Service (alec crate v{})", alec::VERSION);
 
     let registry = Arc::new(Registry::new());
     let metrics = Metrics::new(&registry);

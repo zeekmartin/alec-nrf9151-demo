@@ -21,6 +21,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#include <alec.h>
+
 LOG_MODULE_REGISTER(alec_demo, LOG_LEVEL_INF);
 
 /* ------------------------------------------------------------------ */
@@ -56,6 +58,9 @@ static uint8_t                   tx_buf[256];
 static struct zsock_pollfd       fds;
 static bool                      mqtt_connected;
 static uint32_t                  seq_num;
+static AlecEncoder              *alec_enc_temp;
+static AlecEncoder              *alec_enc_hum;
+static AlecEncoder              *alec_enc_pres;
 
 /* ------------------------------------------------------------------ */
 /*  LTE helpers                                                        */
@@ -243,26 +248,79 @@ static void simulate_reading(struct sensor_payload *p)
 /*  Publish                                                            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * ALEC wire format:
+ *   [u16 len_temp][alec_msg_temp][u16 len_hum][alec_msg_hum][u16 len_pres][alec_msg_pres]
+ *
+ * Each alec_msg is the output of alec_encode_value() for one sensor field.
+ * The backend decoder mirrors this layout to decompress.
+ */
+#define ALEC_BUF_CAP  128   /* per-field encode buffer */
+#define ALEC_TOTAL_CAP (3 * (2 + ALEC_BUF_CAP))
+
 static int publish_reading(const struct sensor_payload *p)
 {
-	/*
-	 * TODO: ALEC compression step
-	 * ---------------------------------------------------------
-	 * Insert ALEC encoder call here to compress *p before
-	 * publishing.  Replace payload / payload_len with the
-	 * compressed output buffer and its length.
-	 *
-	 * Example (pseudo-code):
-	 *   uint8_t compressed[ALEC_MAX_OUTPUT];
-	 *   size_t  compressed_len;
-	 *   alec_encode(p, sizeof(*p), compressed, &compressed_len);
-	 *   ... then publish `compressed` instead of raw `p` ...
-	 * ---------------------------------------------------------
-	 */
+	uint8_t wire[ALEC_TOTAL_CAP];
+	size_t  wire_len = 0;
+	uint64_t ts = (p->timestamp_ms > 0) ? (uint64_t)p->timestamp_ms : 0;
 
-	const uint8_t *payload     = (const uint8_t *)p;
-	size_t         payload_len = sizeof(*p);
+	/* Encode each sensor field individually */
+	struct {
+		AlecEncoder *enc;
+		double       value;
+		const char  *name;
+	} fields[] = {
+		{ alec_enc_temp, (double)p->temperature_c_x100, "temp" },
+		{ alec_enc_hum,  (double)p->humidity_rh_x100,   "hum"  },
+		{ alec_enc_pres, (double)p->pressure_pa,         "pres" },
+	};
 
+	for (int i = 0; i < 3; i++) {
+		uint8_t buf[ALEC_BUF_CAP];
+		size_t  enc_len = 0;
+
+		AlecResult rc = alec_encode_value(
+			fields[i].enc,
+			fields[i].value,
+			ts,
+			fields[i].name,
+			buf, sizeof(buf), &enc_len);
+
+		if (rc != ALEC_OK) {
+			LOG_ERR("ALEC encode %s failed: %s",
+				fields[i].name, alec_result_to_string(rc));
+			/* Fallback: publish raw uncompressed */
+			goto publish_raw;
+		}
+
+		/* Write length prefix (little-endian u16) + encoded bytes */
+		if (wire_len + 2 + enc_len > sizeof(wire)) {
+			LOG_ERR("ALEC wire buffer overflow");
+			goto publish_raw;
+		}
+		wire[wire_len]     = (uint8_t)(enc_len & 0xFF);
+		wire[wire_len + 1] = (uint8_t)((enc_len >> 8) & 0xFF);
+		memcpy(&wire[wire_len + 2], buf, enc_len);
+		wire_len += 2 + enc_len;
+	}
+
+	LOG_INF("ALEC publish %u bytes (raw=%u)  seq=%u  t=%d  rh=%u  pa=%u",
+		(unsigned)wire_len, (unsigned)sizeof(*p), p->sequence,
+		p->temperature_c_x100, p->humidity_rh_x100, p->pressure_pa);
+
+	goto do_publish;
+
+publish_raw:
+	/* Fallback: send the raw struct if ALEC encoding fails */
+	memcpy(wire, p, sizeof(*p));
+	wire_len = sizeof(*p);
+
+	LOG_INF("RAW publish %u bytes  seq=%u  t=%d  rh=%u  pa=%u",
+		(unsigned)wire_len, p->sequence,
+		p->temperature_c_x100, p->humidity_rh_x100, p->pressure_pa);
+
+do_publish:
+	;
 	struct mqtt_publish_param param = {
 		.message = {
 			.topic = {
@@ -273,16 +331,12 @@ static int publish_reading(const struct sensor_payload *p)
 				.qos = MQTT_QOS_1_AT_LEAST_ONCE,
 			},
 			.payload = {
-				.data = (uint8_t *)payload,
-				.len  = payload_len,
+				.data = wire,
+				.len  = wire_len,
 			},
 		},
 		.message_id = seq_num,
 	};
-
-	LOG_INF("Publishing %u bytes  seq=%u  t=%d  rh=%u  pa=%u",
-		(unsigned)payload_len, p->sequence,
-		p->temperature_c_x100, p->humidity_rh_x100, p->pressure_pa);
 
 	return mqtt_publish(&client, &param);
 }
@@ -295,7 +349,17 @@ int main(void)
 {
 	int err;
 
-	LOG_INF("ALEC NB-IoT Sensor Demo starting");
+	LOG_INF("ALEC NB-IoT Sensor Demo starting (alec-ffi %s)",
+		alec_version());
+
+	/* 0. ALEC encoders (one per sensor field for independent context) */
+	alec_enc_temp = alec_encoder_new();
+	alec_enc_hum  = alec_encoder_new();
+	alec_enc_pres = alec_encoder_new();
+	if (!alec_enc_temp || !alec_enc_hum || !alec_enc_pres) {
+		LOG_ERR("Failed to create ALEC encoders — halting");
+		return -ENOMEM;
+	}
 
 	/* 1. LTE */
 	err = lte_connect();
