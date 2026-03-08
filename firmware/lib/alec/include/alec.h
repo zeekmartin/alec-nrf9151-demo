@@ -1,11 +1,11 @@
 /*
  * ALEC — Adaptive Lazy Evolving Compression
- * C/C++ FFI bindings (from alec-ffi crate v1.2)
+ * C/C++ FFI bindings (from alec-ffi crate v1.2.1, bare-metal)
  *
- * Build libalec.a for nRF9151 (Cortex-M33):
+ * Build libalec_ffi.a for nRF9151 (Cortex-M33):
  *   rustup target add thumbv8m.main-none-eabihf
  *   cd alec-ffi && cargo build --release --target thumbv8m.main-none-eabihf
- *   cp target/thumbv8m.main-none-eabihf/release/libalec.a <firmware>/lib/alec/
+ *   cp target/thumbv8m.main-none-eabihf/release/libalec_ffi.a <firmware>/lib/alec/
  */
 
 #ifndef ALEC_H
@@ -143,6 +143,13 @@ AlecResult alec_decode_multi(
 
 const char *alec_version(void);
 const char *alec_result_to_string(AlecResult result);
+
+/**
+ * Initialize the ALEC internal heap.
+ * Must be called once before any other ALEC function on bare-metal targets.
+ * Added in alec-ffi 1.2.1.
+ */
+void alec_heap_init(void);
 
 #ifdef __cplusplus
 }
