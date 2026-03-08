@@ -329,6 +329,9 @@ int main(void)
 {
 	int err;
 
+	/* Initialize ALEC heap — required for bare-metal (alec-ffi 1.2.1) */
+	alec_heap_init();
+
 	LOG_INF("ALEC NB-IoT Sensor Demo starting (alec-ffi %s)",
 		alec_version());
 
