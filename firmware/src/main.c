@@ -283,14 +283,22 @@ static int publish_reading(const struct sensor_payload *p)
 	const uint8_t *raw = (const uint8_t *)p;
 	size_t raw_len = sizeof(*p);
 
-	/* ALEC-compress the raw struct bytes */
+	/* Convert struct fields to float array for alec_encode_multi() */
+	float values[] = {
+		(float)p->temperature_c_x100,
+		(float)p->humidity_rh_x100,
+		(float)p->pressure_pa,
+		(float)p->timestamp_ms,
+		(float)p->sequence,
+	};
+
 	uint8_t compressed[ALEC_OUTPUT_CAP];
 	size_t compressed_len = 0;
 
-	AlecResult rc = alec_encode(alec_enc,
-				    raw, raw_len,
-				    compressed, sizeof(compressed),
-				    &compressed_len);
+	AlecResult rc = alec_encode_multi(alec_enc,
+					  values, ARRAY_SIZE(values),
+					  compressed, sizeof(compressed),
+					  &compressed_len);
 
 	if (rc == ALEC_OK && compressed_len > 0) {
 		LOG_INF("ALEC %u→%uB (%.0f%%) seq=%u t=%d rh=%u pa=%u",

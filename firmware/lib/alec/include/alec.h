@@ -46,56 +46,36 @@ typedef struct AlecDecoder AlecDecoder;
 /* ------------------------------------------------------------------ */
 
 AlecEncoder *alec_encoder_new(void);
-AlecEncoder *alec_encoder_new_with_checksum(void);
 void         alec_encoder_free(AlecEncoder *encoder);
-
-/**
- * Compress raw bytes.
- *
- * Matches Rust API: encoder.encode(&raw_bytes, &mut ctx) → Vec<u8>
- *
- * @param encoder       Encoder handle (owns internal Context)
- * @param input         Raw bytes to compress
- * @param input_len     Length of input
- * @param output        Buffer for compressed output
- * @param output_capacity  Size of output buffer
- * @param output_len    [out] Actual compressed length written
- * @return ALEC_OK on success
- */
-AlecResult alec_encode(
-    AlecEncoder   *encoder,
-    const uint8_t *input,
-    size_t         input_len,
-    uint8_t       *output,
-    size_t         output_capacity,
-    size_t        *output_len
-);
 
 /**
  * Encode a single floating-point sensor value.
  */
 AlecResult alec_encode_value(
     AlecEncoder *encoder,
-    double       value,
-    uint64_t     timestamp,
-    const char  *source_id,
-    uint8_t     *output,
-    size_t       output_capacity,
-    size_t      *output_len
+    float        value,
+    uint8_t     *out_buf,
+    uint8_t     *out_bits
 );
 
 /**
- * Encode multiple floating-point sensor values.
+ * Encode multiple floating-point sensor values into a compressed buffer.
+ *
+ * @param encoder   Encoder handle (owns internal Context)
+ * @param values    Array of float sensor values
+ * @param count     Number of values in the array
+ * @param out_buf   Buffer for compressed output
+ * @param cap       Size of out_buf
+ * @param out_len   [out] Actual compressed length written
+ * @return ALEC_OK on success
  */
 AlecResult alec_encode_multi(
-    AlecEncoder   *encoder,
-    const double  *values,
-    size_t         value_count,
-    uint64_t       timestamp,
-    const char    *source_id,
-    uint8_t       *output,
-    size_t         output_capacity,
-    size_t        *output_len
+    AlecEncoder *encoder,
+    const float *values,
+    size_t       count,
+    uint8_t     *out_buf,
+    size_t       cap,
+    size_t      *out_len
 );
 
 /* ------------------------------------------------------------------ */
@@ -103,39 +83,11 @@ AlecResult alec_encode_multi(
 /* ------------------------------------------------------------------ */
 
 AlecDecoder *alec_decoder_new(void);
-AlecDecoder *alec_decoder_new_with_checksum(void);
 void         alec_decoder_free(AlecDecoder *decoder);
 
-/**
- * Decompress ALEC-encoded bytes.
- *
- * Matches Rust API: decoder.decode(&compressed, &mut ctx) → Vec<u8>
- */
-AlecResult alec_decode(
-    AlecDecoder   *decoder,
-    const uint8_t *input,
-    size_t         input_len,
-    uint8_t       *output,
-    size_t         output_capacity,
-    size_t        *output_len
-);
+AlecResult alec_decode_value(AlecDecoder *decoder);
 
-AlecResult alec_decode_value(
-    AlecDecoder   *decoder,
-    const uint8_t *input,
-    size_t         input_len,
-    double        *value,
-    uint64_t      *timestamp
-);
-
-AlecResult alec_decode_multi(
-    AlecDecoder   *decoder,
-    const uint8_t *input,
-    size_t         input_len,
-    double        *values,
-    size_t         values_capacity,
-    size_t        *values_count
-);
+AlecResult alec_decode_multi(AlecDecoder *decoder);
 
 /* ------------------------------------------------------------------ */
 /*  Utility                                                            */
