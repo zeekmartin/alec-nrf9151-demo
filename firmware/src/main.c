@@ -4,8 +4,9 @@
  * Sends a simulated sensor reading (temperature, humidity, pressure,
  * timestamp, sequence number) over NB-IoT / MQTT every 60 seconds.
  *
- * Payload is raw binary (uncompressed).  ALEC compression will be
- * inserted at the marked TODO sites in a follow-up step.
+ * Publishes to two topics:
+ *   alec/sensor/demo — ALEC-compressed payload
+ *   alec/sensor/raw  — uncompressed raw struct (for comparison)
  */
 
 #include <zephyr/kernel.h>
@@ -31,7 +32,8 @@ LOG_MODULE_REGISTER(alec_demo, LOG_LEVEL_INF);
 
 #define MQTT_BROKER_HOSTNAME "test.mosquitto.org"
 #define MQTT_BROKER_PORT     1883
-#define MQTT_TOPIC           "alec/sensor/demo"
+#define MQTT_TOPIC_DEMO      "alec/sensor/demo"
+#define MQTT_TOPIC_RAW       "alec/sensor/raw"
 #define MQTT_CLIENT_ID_PFX   "alec_nrf9151_"
 #define PUBLISH_INTERVAL_S   60
 
@@ -58,9 +60,7 @@ static uint8_t                   tx_buf[256];
 static struct zsock_pollfd       fds;
 static bool                      mqtt_connected;
 static uint32_t                  seq_num;
-static AlecEncoder              *alec_enc_temp;
-static AlecEncoder              *alec_enc_hum;
-static AlecEncoder              *alec_enc_pres;
+static AlecEncoder              *alec_enc;
 
 /* ------------------------------------------------------------------ */
 /*  LTE helpers                                                        */
@@ -245,100 +245,80 @@ static void simulate_reading(struct sensor_payload *p)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Publish                                                            */
+/*  Publish helpers                                                    */
 /* ------------------------------------------------------------------ */
 
-/*
- * ALEC wire format:
- *   [u16 len_temp][alec_msg_temp][u16 len_hum][alec_msg_hum][u16 len_pres][alec_msg_pres]
- *
- * Each alec_msg is the output of alec_encode_value() for one sensor field.
- * The backend decoder mirrors this layout to decompress.
- */
-#define ALEC_BUF_CAP  128   /* per-field encode buffer */
-#define ALEC_TOTAL_CAP (3 * (2 + ALEC_BUF_CAP))
-
-static int publish_reading(const struct sensor_payload *p)
+static int mqtt_pub(const char *topic, const uint8_t *data, size_t len,
+		    uint16_t msg_id)
 {
-	uint8_t wire[ALEC_TOTAL_CAP];
-	size_t  wire_len = 0;
-	uint64_t ts = (p->timestamp_ms > 0) ? (uint64_t)p->timestamp_ms : 0;
-
-	/* Encode each sensor field individually */
-	struct {
-		AlecEncoder *enc;
-		double       value;
-		const char  *name;
-	} fields[] = {
-		{ alec_enc_temp, (double)p->temperature_c_x100, "temp" },
-		{ alec_enc_hum,  (double)p->humidity_rh_x100,   "hum"  },
-		{ alec_enc_pres, (double)p->pressure_pa,         "pres" },
-	};
-
-	for (int i = 0; i < 3; i++) {
-		uint8_t buf[ALEC_BUF_CAP];
-		size_t  enc_len = 0;
-
-		AlecResult rc = alec_encode_value(
-			fields[i].enc,
-			fields[i].value,
-			ts,
-			fields[i].name,
-			buf, sizeof(buf), &enc_len);
-
-		if (rc != ALEC_OK) {
-			LOG_ERR("ALEC encode %s failed: %s",
-				fields[i].name, alec_result_to_string(rc));
-			/* Fallback: publish raw uncompressed */
-			goto publish_raw;
-		}
-
-		/* Write length prefix (little-endian u16) + encoded bytes */
-		if (wire_len + 2 + enc_len > sizeof(wire)) {
-			LOG_ERR("ALEC wire buffer overflow");
-			goto publish_raw;
-		}
-		wire[wire_len]     = (uint8_t)(enc_len & 0xFF);
-		wire[wire_len + 1] = (uint8_t)((enc_len >> 8) & 0xFF);
-		memcpy(&wire[wire_len + 2], buf, enc_len);
-		wire_len += 2 + enc_len;
-	}
-
-	LOG_INF("ALEC publish %u bytes (raw=%u)  seq=%u  t=%d  rh=%u  pa=%u",
-		(unsigned)wire_len, (unsigned)sizeof(*p), p->sequence,
-		p->temperature_c_x100, p->humidity_rh_x100, p->pressure_pa);
-
-	goto do_publish;
-
-publish_raw:
-	/* Fallback: send the raw struct if ALEC encoding fails */
-	memcpy(wire, p, sizeof(*p));
-	wire_len = sizeof(*p);
-
-	LOG_INF("RAW publish %u bytes  seq=%u  t=%d  rh=%u  pa=%u",
-		(unsigned)wire_len, p->sequence,
-		p->temperature_c_x100, p->humidity_rh_x100, p->pressure_pa);
-
-do_publish:
-	;
 	struct mqtt_publish_param param = {
 		.message = {
 			.topic = {
 				.topic = {
-					.utf8 = (uint8_t *)MQTT_TOPIC,
-					.size = strlen(MQTT_TOPIC),
+					.utf8 = (uint8_t *)topic,
+					.size = strlen(topic),
 				},
 				.qos = MQTT_QOS_1_AT_LEAST_ONCE,
 			},
 			.payload = {
-				.data = wire,
-				.len  = wire_len,
+				.data = (uint8_t *)data,
+				.len  = len,
 			},
 		},
-		.message_id = seq_num,
+		.message_id = msg_id,
 	};
 
 	return mqtt_publish(&client, &param);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Publish reading (ALEC-compressed + raw)                            */
+/* ------------------------------------------------------------------ */
+
+#define ALEC_OUTPUT_CAP 128
+
+static int publish_reading(const struct sensor_payload *p)
+{
+	int err;
+	const uint8_t *raw = (const uint8_t *)p;
+	size_t raw_len = sizeof(*p);
+
+	/* ALEC-compress the raw struct bytes */
+	uint8_t compressed[ALEC_OUTPUT_CAP];
+	size_t compressed_len = 0;
+
+	AlecResult rc = alec_encode(alec_enc,
+				    raw, raw_len,
+				    compressed, sizeof(compressed),
+				    &compressed_len);
+
+	if (rc == ALEC_OK && compressed_len > 0) {
+		LOG_INF("ALEC %u→%uB (%.0f%%) seq=%u t=%d rh=%u pa=%u",
+			(unsigned)raw_len, (unsigned)compressed_len,
+			100.0f * (1.0f - (float)compressed_len / (float)raw_len),
+			p->sequence,
+			p->temperature_c_x100, p->humidity_rh_x100,
+			p->pressure_pa);
+
+		err = mqtt_pub(MQTT_TOPIC_DEMO, compressed, compressed_len,
+			       seq_num * 2);
+		if (err) {
+			LOG_ERR("Publish compressed failed: %d", err);
+			return err;
+		}
+	} else {
+		LOG_WRN("ALEC encode failed (%s) — sending raw only",
+			alec_result_to_string(rc));
+	}
+
+	/* Always publish raw struct for comparison */
+	err = mqtt_pub(MQTT_TOPIC_RAW, raw, raw_len, seq_num * 2 + 1);
+	if (err) {
+		LOG_ERR("Publish raw failed: %d", err);
+		return err;
+	}
+
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -352,12 +332,10 @@ int main(void)
 	LOG_INF("ALEC NB-IoT Sensor Demo starting (alec-ffi %s)",
 		alec_version());
 
-	/* 0. ALEC encoders (one per sensor field for independent context) */
-	alec_enc_temp = alec_encoder_new();
-	alec_enc_hum  = alec_encoder_new();
-	alec_enc_pres = alec_encoder_new();
-	if (!alec_enc_temp || !alec_enc_hum || !alec_enc_pres) {
-		LOG_ERR("Failed to create ALEC encoders — halting");
+	/* 0. ALEC encoder */
+	alec_enc = alec_encoder_new();
+	if (!alec_enc) {
+		LOG_ERR("Failed to create ALEC encoder — halting");
 		return -ENOMEM;
 	}
 
