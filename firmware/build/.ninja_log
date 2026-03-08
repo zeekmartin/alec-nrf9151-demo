@@ -1,0 +1,11 @@
+# ninja log v5
+4	380	7946854014215372	_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-mkdir	1e4a877a77b231be
+4	380	7946854014215372	C:/dev/alec-nrf9151-demo/firmware/build/_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-mkdir	1e4a877a77b231be
+382	510	7946854015505429	_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-download	df69be1991a91a51
+382	510	7946854015505429	C:/dev/alec-nrf9151-demo/firmware/build/_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-download	df69be1991a91a51
+511	641	7946854016805200	_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-update	c7babbe73f0e6906
+511	641	7946854016805200	C:/dev/alec-nrf9151-demo/firmware/build/_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-update	c7babbe73f0e6906
+642	781	7946854018176551	_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-patch	1dd1d07f61999142
+642	781	7946854018176551	C:/dev/alec-nrf9151-demo/firmware/build/_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-patch	1dd1d07f61999142
+782	920	7946854019581903	_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-configure	1fc5ec588ae168f9
+782	920	7946854019581903	C:/dev/alec-nrf9151-demo/firmware/build/_sysbuild/sysbuild/images/firmware-prefix/src/firmware-stamp/firmware-configure	1fc5ec588ae168f9

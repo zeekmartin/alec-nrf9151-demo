@@ -1,0 +1,7 @@
+default: firmware
+build_dir: C:/dev/alec-nrf9151-demo/firmware/build
+domains:
+  - name: firmware
+    build_dir: C:/dev/alec-nrf9151-demo/firmware/build/firmware
+flash_order:
+  - firmware
