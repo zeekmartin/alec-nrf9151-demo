@@ -358,9 +358,12 @@ int main(void)
 {
 	int err;
 
-	k_sleep(K_SECONDS(3));
-
-	/* Initialize ALEC heap — required for bare-metal (alec-ffi 1.2.1) */
+	/*
+	 * NOTE: alec_heap_init() crashes on Zephyr/nRF9151 — the alec-ffi
+	 * internal heap conflicts with Zephyr's memory layout.  Skip it and
+	 * let alec-ffi fall back to k_malloc instead.  Ensure
+	 * CONFIG_HEAP_MEM_POOL_SIZE is large enough (>= 16384).
+	 */
 	// alec_heap_init();
 
 	LOG_INF("ALEC NB-IoT Sensor Demo starting (alec-ffi %s)",
