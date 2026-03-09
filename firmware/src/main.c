@@ -337,58 +337,22 @@ int main(void)
 {
 	int err;
 
-	/* Initialize ALEC heap — required for bare-metal (alec-ffi 1.2.1) */
-	alec_heap_init();
+	/*
+	 * NOTE: alec_heap_init() crashes on Zephyr/nRF9151 — the alec-ffi
+	 * internal heap conflicts with Zephyr's memory layout.  Skip it and
+	 * let alec-ffi fall back to k_malloc instead.  Ensure
+	 * CONFIG_HEAP_MEM_POOL_SIZE is large enough (>= 16384).
+	 */
+	// alec_heap_init();
 
 	LOG_INF("ALEC NB-IoT Sensor Demo starting (alec-ffi %s)",
 		alec_version());
 
-	/* 0. ALEC encoder — debug allocation */
-	LOG_INF("Heap before alec_encoder_new(): sys_heap free (CONFIG_HEAP_MEM_POOL_SIZE=%d)",
-		CONFIG_HEAP_MEM_POOL_SIZE);
-
-	/* Try to probe available heap by allocating + freeing test blocks */
-	for (size_t probe = 8192; probe >= 256; probe /= 2) {
-		void *p = k_malloc(probe);
-		if (p) {
-			k_free(p);
-			LOG_INF("  k_malloc(%u) = OK (free >= %u)", (unsigned)probe, (unsigned)probe);
-		} else {
-			LOG_WRN("  k_malloc(%u) = FAILED", (unsigned)probe);
-		}
-	}
-
+	/* 0. ALEC encoder */
 	alec_enc = alec_encoder_new();
-	LOG_INF("alec_encoder_new() returned %p", alec_enc);
-
 	if (!alec_enc) {
 		LOG_ERR("Failed to create ALEC encoder — halting");
-		LOG_ERR("Heap too small (%d bytes). ALEC encoder likely needs >= 8192 bytes.",
-			CONFIG_HEAP_MEM_POOL_SIZE);
-		LOG_ERR("Increase CONFIG_HEAP_MEM_POOL_SIZE in prj.conf");
 		return -ENOMEM;
-	}
-
-	/* Verify the encoder actually works (catches deferred internal alloc failures) */
-	{
-		float test_val = 42.0f;
-		uint8_t test_buf[32];
-		size_t test_len = 0;
-		AlecResult test_rc = alec_encode_multi(alec_enc,
-						       &test_val, 1,
-						       test_buf, sizeof(test_buf),
-						       &test_len);
-		if (test_rc != ALEC_OK) {
-			LOG_ERR("ALEC encoder created (%p) but encode fails: %s",
-				alec_enc, alec_result_to_string(test_rc));
-			LOG_ERR("Internal context alloc likely failed — heap too small (%d bytes)",
-				CONFIG_HEAP_MEM_POOL_SIZE);
-			LOG_ERR("Try CONFIG_HEAP_MEM_POOL_SIZE=16384 or 32768");
-			alec_encoder_free(alec_enc);
-			alec_enc = NULL;
-			return -ENOMEM;
-		}
-		LOG_INF("ALEC encoder self-test OK: encoded 1 float → %u bytes", (unsigned)test_len);
 	}
 
 	/* 1. LTE */
