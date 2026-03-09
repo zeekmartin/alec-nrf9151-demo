@@ -1,107 +1,332 @@
-/*
- * ALEC — Adaptive Lazy Evolving Compression
- * C/C++ FFI bindings (from alec-ffi crate v1.2.1, bare-metal)
+/**
+ * ALEC - Adaptive Lazy Evolving Compression
+ * Copyright (c) 2025 David Martin Venti
  *
- * Build libalec_ffi.a for nRF9151 (Cortex-M33):
- *   rustup target add thumbv8m.main-none-eabihf
- *   cd alec-ffi && cargo build --release --target thumbv8m.main-none-eabihf
- *   cp target/thumbv8m.main-none-eabihf/release/libalec_ffi.a <firmware>/lib/alec/
+ * Dual-licensed under AGPL-3.0 and Commercial License.
+ * See LICENSE file for details.
+ *
+ * C/C++ bindings for ALEC compression library.
+ *
+ * Example usage:
+ *
+ *     #include "alec.h"
+ *
+ *     AlecEncoder* enc = alec_encoder_new();
+ *     uint8_t output[256];
+ *     size_t output_len;
+ *
+ *     AlecResult res = alec_encode_value(
+ *         enc, 22.5, 0, NULL,
+ *         output, sizeof(output), &output_len
+ *     );
+ *
+ *     if (res == ALEC_OK) {
+ *         // Use compressed data in output[0..output_len]
+ *     }
+ *
+ *     alec_encoder_free(enc);
  */
 
 #ifndef ALEC_H
 #define ALEC_H
 
-#include <stddef.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ------------------------------------------------------------------ */
-/*  Result codes                                                       */
-/* ------------------------------------------------------------------ */
+/* ============================================================================
+ * Types
+ * ============================================================================ */
 
-typedef enum {
-    ALEC_OK = 0,
-    ALEC_ERR_INVALID_INPUT = 1,
-    ALEC_ERR_BUFFER_TOO_SMALL = 2,
-    ALEC_ERR_ENCODE_FAILED = 3,
-    ALEC_ERR_DECODE_FAILED = 4,
-    ALEC_ERR_NULL_POINTER = 5,
-    ALEC_ERR_INVALID_UTF8 = 6,
-    ALEC_ERR_IO_ERROR = 7,
-    ALEC_ERR_VERSION_MISMATCH = 8,
-} AlecResult;
-
-/* ------------------------------------------------------------------ */
-/*  Opaque handles                                                     */
-/* ------------------------------------------------------------------ */
-
+/**
+ * Opaque encoder handle.
+ *
+ * Created with alec_encoder_new(), freed with alec_encoder_free().
+ * Do not access internal fields directly.
+ */
 typedef struct AlecEncoder AlecEncoder;
+
+/**
+ * Opaque decoder handle.
+ *
+ * Created with alec_decoder_new(), freed with alec_decoder_free().
+ * Do not access internal fields directly.
+ */
 typedef struct AlecDecoder AlecDecoder;
 
-/* ------------------------------------------------------------------ */
-/*  Encoder                                                            */
-/* ------------------------------------------------------------------ */
+/**
+ * Result codes for ALEC functions.
+ */
+typedef enum {
+    /** Operation completed successfully */
+    ALEC_OK = 0,
+    /** Invalid input data provided */
+    ALEC_ERROR_INVALID_INPUT = 1,
+    /** Output buffer is too small */
+    ALEC_ERROR_BUFFER_TOO_SMALL = 2,
+    /** Encoding operation failed */
+    ALEC_ERROR_ENCODING_FAILED = 3,
+    /** Decoding operation failed */
+    ALEC_ERROR_DECODING_FAILED = 4,
+    /** Null pointer was provided */
+    ALEC_ERROR_NULL_POINTER = 5,
+    /** Invalid UTF-8 string */
+    ALEC_ERROR_INVALID_UTF8 = 6,
+    /** File I/O error */
+    ALEC_ERROR_FILE_IO = 7,
+    /** Context version mismatch */
+    ALEC_ERROR_VERSION_MISMATCH = 8,
+} AlecResult;
 
-AlecEncoder *alec_encoder_new(void);
-void         alec_encoder_free(AlecEncoder *encoder);
+/* ============================================================================
+ * Version and Utility Functions
+ * ============================================================================ */
 
 /**
- * Encode a single floating-point sensor value.
+ * Get the ALEC library version string.
+ *
+ * @return Null-terminated version string (e.g., "1.0.0").
+ *         Valid for the lifetime of the program.
+ */
+const char* alec_version(void);
+
+/**
+ * Convert a result code to a human-readable string.
+ *
+ * @param result The result code to convert.
+ * @return Null-terminated description string.
+ *         Valid for the lifetime of the program.
+ */
+const char* alec_result_to_string(AlecResult result);
+
+/* ============================================================================
+ * Encoder Functions
+ * ============================================================================ */
+
+/**
+ * Create a new ALEC encoder.
+ *
+ * @return Pointer to new encoder, or NULL on allocation failure.
+ *         Must be freed with alec_encoder_free().
+ */
+AlecEncoder* alec_encoder_new(void);
+
+/**
+ * Create a new encoder with checksum enabled.
+ *
+ * Checksums add integrity verification but increase message size.
+ *
+ * @return Pointer to new encoder, or NULL on allocation failure.
+ */
+AlecEncoder* alec_encoder_new_with_checksum(void);
+
+/**
+ * Free an encoder.
+ *
+ * @param encoder Encoder to free. May be NULL (no-op).
+ *
+ * @warning Do not use the encoder after calling this function.
+ */
+void alec_encoder_free(AlecEncoder* encoder);
+
+/**
+ * Encode a single floating-point value.
+ *
+ * @param encoder        Encoder handle (must not be NULL).
+ * @param value          The value to encode.
+ * @param timestamp      Timestamp for the value (can be 0 if not used).
+ * @param source_id      Source identifier string (null-terminated, can be NULL).
+ * @param output         Output buffer for encoded data.
+ * @param output_capacity Size of output buffer in bytes.
+ * @param output_len     Pointer to store actual encoded length.
+ *
+ * @return ALEC_OK on success, error code otherwise.
  */
 AlecResult alec_encode_value(
-    AlecEncoder *encoder,
-    float        value,
-    uint8_t     *out_buf,
-    uint8_t     *out_bits
+    AlecEncoder* encoder,
+    double value,
+    uint64_t timestamp,
+    const char* source_id,
+    uint8_t* output,
+    size_t output_capacity,
+    size_t* output_len
 );
 
 /**
- * Encode multiple floating-point sensor values into a compressed buffer.
+ * Encode multiple values with adaptive per-channel compression.
  *
- * @param encoder   Encoder handle (owns internal Context)
- * @param values    Array of float sensor values
- * @param count     Number of values in the array
- * @param out_buf   Buffer for compressed output
- * @param cap       Size of out_buf
- * @param out_len   [out] Actual compressed length written
- * @return ALEC_OK on success
+ * Each channel is independently classified and encoded using the optimal
+ * strategy (Repeated, Delta8, Delta16, Raw32, Raw64). A single shared
+ * header (13 bytes) covers all channels, amortising the header cost.
+ *
+ * P5 (disposable) channels are excluded from the output frame but their
+ * context is still updated for future predictions.
+ *
+ * @param encoder         Encoder handle.
+ * @param values          Array of f64 values (one per channel).
+ * @param value_count     Number of channels.
+ * @param timestamps      Per-channel timestamps (array of uint64_t),
+ *                        or NULL to use 0 for all channels.
+ * @param source_ids      Per-channel source identifier strings (array of
+ *                        const char*), or NULL for automatic index-based IDs.
+ * @param priorities      Per-channel priority overrides (1-5),
+ *                        or NULL for classifier-assigned priorities.
+ * @param output          Output buffer for encoded data.
+ * @param output_capacity Size of output buffer in bytes.
+ * @param output_len      Pointer to store actual encoded length.
+ *
+ * @return ALEC_OK on success, error code otherwise.
  */
 AlecResult alec_encode_multi(
-    AlecEncoder *encoder,
-    const float *values,
-    size_t       count,
-    uint8_t     *out_buf,
-    size_t       cap,
-    size_t      *out_len
+    AlecEncoder* encoder,
+    const double* values,
+    size_t value_count,
+    const uint64_t* timestamps,
+    const char* const* source_ids,
+    const uint8_t* priorities,
+    uint8_t* output,
+    size_t output_capacity,
+    size_t* output_len
 );
 
-/* ------------------------------------------------------------------ */
-/*  Decoder                                                            */
-/* ------------------------------------------------------------------ */
-
-AlecDecoder *alec_decoder_new(void);
-void         alec_decoder_free(AlecDecoder *decoder);
-
-AlecResult alec_decode_value(AlecDecoder *decoder);
-
-AlecResult alec_decode_multi(AlecDecoder *decoder);
-
-/* ------------------------------------------------------------------ */
-/*  Utility                                                            */
-/* ------------------------------------------------------------------ */
-
-const char *alec_version(void);
-const char *alec_result_to_string(AlecResult result);
+/**
+ * Save encoder context to a file.
+ *
+ * This allows saving a trained context for later use as a preload.
+ * Both encoder and decoder must use the same context for correct
+ * decompression.
+ *
+ * @param encoder     Encoder handle.
+ * @param path        File path (null-terminated string).
+ * @param sensor_type Sensor type identifier (null-terminated string).
+ *
+ * @return ALEC_OK on success, error code otherwise.
+ */
+AlecResult alec_encoder_save_context(
+    AlecEncoder* encoder,
+    const char* path,
+    const char* sensor_type
+);
 
 /**
- * Initialize the ALEC internal heap.
- * Must be called once before any other ALEC function on bare-metal targets.
- * Added in alec-ffi 1.2.1.
+ * Load encoder context from a preload file.
+ *
+ * This enables instant optimal compression by loading a pre-trained
+ * context.
+ *
+ * @param encoder Encoder handle.
+ * @param path    File path to preload (null-terminated string).
+ *
+ * @return ALEC_OK on success, error code otherwise.
  */
-void alec_heap_init(void);
+AlecResult alec_encoder_load_context(
+    AlecEncoder* encoder,
+    const char* path
+);
+
+/**
+ * Get the current context version.
+ *
+ * The context version changes when the encoder learns new patterns.
+ * Encoder and decoder must have matching versions for correct
+ * decompression.
+ *
+ * @param encoder Encoder handle.
+ *
+ * @return Context version number, or 0 if encoder is NULL.
+ */
+uint32_t alec_encoder_context_version(const AlecEncoder* encoder);
+
+/* ============================================================================
+ * Decoder Functions
+ * ============================================================================ */
+
+/**
+ * Create a new ALEC decoder.
+ *
+ * @return Pointer to new decoder, or NULL on allocation failure.
+ *         Must be freed with alec_decoder_free().
+ */
+AlecDecoder* alec_decoder_new(void);
+
+/**
+ * Create a new decoder with checksum verification enabled.
+ *
+ * @return Pointer to new decoder, or NULL on allocation failure.
+ */
+AlecDecoder* alec_decoder_new_with_checksum(void);
+
+/**
+ * Free a decoder.
+ *
+ * @param decoder Decoder to free. May be NULL (no-op).
+ */
+void alec_decoder_free(AlecDecoder* decoder);
+
+/**
+ * Decode compressed data to a single value.
+ *
+ * @param decoder   Decoder handle.
+ * @param input     Compressed input data.
+ * @param input_len Length of input data.
+ * @param value     Pointer to store decoded value.
+ * @param timestamp Pointer to store decoded timestamp (can be NULL).
+ *
+ * @return ALEC_OK on success, error code otherwise.
+ */
+AlecResult alec_decode_value(
+    AlecDecoder* decoder,
+    const uint8_t* input,
+    size_t input_len,
+    double* value,
+    uint64_t* timestamp
+);
+
+/**
+ * Decode compressed data to multiple values.
+ *
+ * @param decoder         Decoder handle.
+ * @param input           Compressed input data.
+ * @param input_len       Length of input data.
+ * @param values          Output buffer for decoded values.
+ * @param values_capacity Maximum number of values that can be stored.
+ * @param values_count    Pointer to store actual number of decoded values.
+ *
+ * @return ALEC_OK on success, error code otherwise.
+ */
+AlecResult alec_decode_multi(
+    AlecDecoder* decoder,
+    const uint8_t* input,
+    size_t input_len,
+    double* values,
+    size_t values_capacity,
+    size_t* values_count
+);
+
+/**
+ * Load decoder context from a preload file.
+ *
+ * @param decoder Decoder handle.
+ * @param path    File path to preload (null-terminated string).
+ *
+ * @return ALEC_OK on success, error code otherwise.
+ */
+AlecResult alec_decoder_load_context(
+    AlecDecoder* decoder,
+    const char* path
+);
+
+/**
+ * Get the current decoder context version.
+ *
+ * @param decoder Decoder handle.
+ *
+ * @return Context version number, or 0 if decoder is NULL.
+ */
+uint32_t alec_decoder_context_version(const AlecDecoder* decoder);
 
 #ifdef __cplusplus
 }

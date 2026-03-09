@@ -36,7 +36,7 @@ LOG_MODULE_REGISTER(alec_demo, LOG_LEVEL_INF);
 #define MQTT_TOPIC_DEMO "alec/sensor/demo"
 #define MQTT_TOPIC_RAW "alec/sensor/raw"
 #define MQTT_CLIENT_ID_PFX "alec_nrf9151_"
-#define PUBLISH_INTERVAL_S 60
+#define PUBLISH_INTERVAL_S 5
 
 /* ------------------------------------------------------------------ */
 /*  Sensor payload (binary struct, packed)                             */
@@ -240,23 +240,49 @@ static void mqtt_process(void)
 /*  Sensor simulation                                                  */
 /* ------------------------------------------------------------------ */
 
+static int16_t sim_temp_x100 = 2400;   /* 24.00°C */
+static uint16_t sim_rh_x100 = 6000;	   /* 60.00%RH */
+static uint32_t sim_press_pa = 101000; /* 1010.00 hPa */
+
+/* Deterministic drift table — no rand32, repeating cycle of 16 steps */
+static const int8_t drift_temp[] = {1, -1, 0, 1, 0, -1, 1, 0, -1, 0, 1, -1, 0, 0, 1, -1};
+static const int8_t drift_rh[] = {2, -1, 0, -2, 1, 0, 2, -1, -2, 0, 1, 2, -1, 0, -1, 1};
+static const int8_t drift_press[] = {1, 0, -1, 1, 0, 0, -1, 1, 0, -1, 1, 0, -1, 0, 1, 0};
+static uint8_t drift_idx = 0;
+
 static void simulate_reading(struct sensor_payload *p)
 {
-	/* Temperature: 20.00–30.00 °C */
-	p->temperature_c_x100 = 2000 + (int16_t)(sys_rand32_get() % 1001);
+	uint8_t i = drift_idx % 16;
 
-	/* Humidity: 40.00–70.00 %RH */
-	p->humidity_rh_x100 = 4000 + (uint16_t)(sys_rand32_get() % 3001);
+	sim_temp_x100 += drift_temp[i];
+	if (sim_temp_x100 < 2350)
+		sim_temp_x100 = 2350;
+	if (sim_temp_x100 > 2450)
+		sim_temp_x100 = 2450;
 
-	/* Pressure: 99000–103000 Pa */
-	p->pressure_pa = 99000 + (sys_rand32_get() % 4001);
+	int32_t rh = (int32_t)sim_rh_x100 + drift_rh[i];
+	if (rh < 5800)
+		rh = 5800;
+	if (rh > 6200)
+		rh = 6200;
+	sim_rh_x100 = (uint16_t)rh;
 
-	/* Timestamp (ms since epoch, or 0 if time not available) */
+	int32_t pa = (int32_t)sim_press_pa + drift_press[i];
+	if (pa < 100800)
+		pa = 100800;
+	if (pa > 101200)
+		pa = 101200;
+	sim_press_pa = (uint32_t)pa;
+
+	drift_idx++;
+
+	p->temperature_c_x100 = sim_temp_x100;
+	p->humidity_rh_x100 = sim_rh_x100;
+	p->pressure_pa = sim_press_pa;
+
 	int64_t ts = 0;
-
 	date_time_now(&ts);
 	p->timestamp_ms = ts;
-
 	p->sequence = seq_num++;
 }
 
@@ -292,6 +318,7 @@ static int mqtt_pub(const char *topic, const uint8_t *data, size_t len,
 /* ------------------------------------------------------------------ */
 
 #define ALEC_OUTPUT_CAP 128
+#define ALEC_N_CHANNELS 5
 
 static int publish_reading(const struct sensor_payload *p)
 {
@@ -299,28 +326,48 @@ static int publish_reading(const struct sensor_payload *p)
 	const uint8_t *raw = (const uint8_t *)p;
 	size_t raw_len = sizeof(*p);
 
-	/* Convert struct fields to float array for alec_encode_multi() */
-	float values[] = {
-		(float)p->temperature_c_x100,
-		(float)p->humidity_rh_x100,
-		(float)p->pressure_pa,
-		(float)p->timestamp_ms,
-		(float)p->sequence,
-	};
+	/*
+	 * v1.3 encode_multi: shared header + per-channel adaptive encoding.
+	 * P1-P4 channels are included; P5 (Disposable) update context only.
+	 */
+
+	double values[ALEC_N_CHANNELS];
+	values[0] = (double)p->temperature_c_x100;
+	values[1] = (double)p->humidity_rh_x100;
+	values[2] = (double)p->pressure_pa;
+	values[3] = (double)p->timestamp_ms;
+	values[4] = (double)p->sequence;
+
+	static const char *source_ids[ALEC_N_CHANNELS] = {
+		"temp", "rh", "press", "ts", "seq"};
+
+	/* All P3 (Normal) — let ALEC classify naturally */
+	static const uint8_t priorities[ALEC_N_CHANNELS] = {3, 3, 3, 3, 3};
+
+	/* Shared timestamp for all channels */
+	uint64_t timestamps[ALEC_N_CHANNELS];
+	for (int i = 0; i < ALEC_N_CHANNELS; i++)
+	{
+		timestamps[i] = (uint64_t)p->timestamp_ms;
+	}
 
 	uint8_t compressed[ALEC_OUTPUT_CAP];
 	size_t compressed_len = 0;
 
-	AlecResult rc = alec_encode_multi(alec_enc,
-									  values, ARRAY_SIZE(values),
-									  compressed, sizeof(compressed),
-									  &compressed_len);
+	AlecResult rc = alec_encode_multi(
+		alec_enc,
+		values, ALEC_N_CHANNELS,
+		timestamps, /* per-channel timestamps */
+		source_ids, /* per-channel source_ids */
+		priorities, /* per-channel priorities */
+		compressed, sizeof(compressed),
+		&compressed_len);
 
 	if (rc == ALEC_OK && compressed_len > 0)
 	{
-		LOG_INF("ALEC %u→%uB (%.0f%%) seq=%u t=%d rh=%u pa=%u",
+		LOG_INF("ALEC %u->%uB (%.0f%%) seq=%u t=%d rh=%u pa=%u",
 				(unsigned)raw_len, (unsigned)compressed_len,
-				100.0f * (1.0f - (float)compressed_len / (float)raw_len),
+				(double)(100.0 * (1.0 - (double)compressed_len / (double)raw_len)),
 				p->sequence,
 				p->temperature_c_x100, p->humidity_rh_x100,
 				p->pressure_pa);
@@ -358,6 +405,8 @@ int main(void)
 {
 	int err;
 
+	k_sleep(K_SECONDS(3));
+
 	/*
 	 * NOTE: alec_heap_init() crashes on Zephyr/nRF9151 — the alec-ffi
 	 * internal heap conflicts with Zephyr's memory layout.  Skip it and
@@ -369,12 +418,41 @@ int main(void)
 	LOG_INF("ALEC NB-IoT Sensor Demo starting (alec-ffi %s)",
 			alec_version());
 
-	/* 0. ALEC encoder */
+	/* 0. ALEC encoder — diagnostic */
+	LOG_INF("Heap pool size: %d bytes", CONFIG_HEAP_MEM_POOL_SIZE);
+	LOG_INF("Calling alec_encoder_new()...");
+
 	alec_enc = alec_encoder_new();
+
+	LOG_INF("alec_encoder_new returned: %p", (void *)alec_enc);
+
 	if (!alec_enc)
 	{
 		LOG_ERR("Failed to create ALEC encoder — halting");
+		LOG_ERR("Increase CONFIG_HEAP_MEM_POOL_SIZE (currently %d)",
+				CONFIG_HEAP_MEM_POOL_SIZE);
 		return -ENOMEM;
+	}
+
+	LOG_INF("ALEC encoder initialised OK");
+
+	/* Self-test: encode one value to verify encoder is functional */
+	{
+		uint8_t test_out[32];
+		size_t test_len = 0;
+		AlecResult test_rc = alec_encode_value(alec_enc,
+											   1.0,	 /* value (double) */
+											   0ULL, /* timestamp */
+											   NULL, /* source_id */
+											   test_out, sizeof(test_out),
+											   &test_len);
+		if (test_rc != ALEC_OK)
+		{
+			LOG_ERR("ALEC self-test failed: %s (rc=%d)",
+					alec_result_to_string(test_rc), (int)test_rc);
+			return -ENOMEM;
+		}
+		LOG_INF("ALEC self-test OK: 8B -> %uB", (unsigned)test_len);
 	}
 
 	/* 1. LTE */
