@@ -71,6 +71,7 @@ zephyr/linker_zephyr_pre0.cmd: \
   C:/ncs/v2.9.2/zephyr/include/zephyr/linker/kobject-rom.ld \
   C:/ncs/v2.9.2/zephyr/include/zephyr/linker/cplusplus-rom.ld \
   zephyr/include/generated/snippets-ram-sections.ld \
+  C:/ncs/v2.9.2/zephyr/modules/segger/segger_rtt.ld \
   C:/ncs/v2.9.2/zephyr/arch/common/ramfunc.ld \
   zephyr/include/generated/snippets-ramfunc-section.ld \
   zephyr/include/generated/snippets-rwdata.ld \

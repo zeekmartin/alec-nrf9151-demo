@@ -415,8 +415,9 @@ C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/open-amp/CMakeFiles/edi
 C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/open-amp/CMakeFiles/rebuild_cache.dir
 C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/picolibc/CMakeFiles/edit_cache.dir
 C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/picolibc/CMakeFiles/rebuild_cache.dir
-C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/segger/CMakeFiles/edit_cache.dir
 C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/segger/CMakeFiles/rebuild_cache.dir
+C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/segger/CMakeFiles/modules__segger.dir
+C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/segger/CMakeFiles/edit_cache.dir
 C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/tinycrypt/CMakeFiles/edit_cache.dir
 C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/tinycrypt/CMakeFiles/rebuild_cache.dir
 C:/dev/alec-nrf9151-demo/firmware/build/firmware/modules/uoscore-uedhoc/CMakeFiles/edit_cache.dir

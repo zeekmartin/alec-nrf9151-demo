@@ -212,6 +212,13 @@ _nrf_modem_lib_shutdown_cb_list_end = .;
  . = 0x2000c568;
  . = ALIGN(_region_min_align);
  _image_ram_start = .;
+_RTT_SECTION_NAME (NOLOAD) : ALIGN_WITH_INPUT
+{
+__rtt_buff_data_start = .;
+*(".rtt_buff_data")
+__rtt_buff_data_end = ALIGN(4);
+} > RAM AT > RAM
+__rtt_buff_data_size = __rtt_buff_data_end - __rtt_buff_data_start;
 .ramfunc : ALIGN_WITH_INPUT
 {
  . = ALIGN(_region_min_align);

@@ -10,8 +10,3 @@ set_target_properties(alec_ffi PROPERTIES
 target_include_directories(alec_ffi INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_options(alec_ffi INTERFACE
-    -Wl,--whole-archive
-    ${CMAKE_CURRENT_SOURCE_DIR}/libalec_ffi.a
-    -Wl,--no-whole-archive
-)
