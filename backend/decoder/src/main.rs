@@ -1,15 +1,16 @@
-///! ALEC Decoder Service
-///!
-///! Subscribes to MQTT topics:
-///!   - alec/sensor/demo  — ALEC-compressed payloads (decoded with alec crate)
-///!   - alec/sensor/raw   — raw binary payloads (for comparison)
-///!
-///! Exposes Prometheus metrics on :9100/metrics.
+//! ALEC Decoder Service
+//!
+//! Subscribes to MQTT topics:
+//!   - alec/sensor/demo  — ALEC-compressed payloads (decoded with alec crate)
+//!   - alec/sensor/raw   — raw binary payloads (for comparison)
+//!
+//! Exposes Prometheus metrics on :9100/metrics.
 
-use alec::{Context, Decoder};
+use alec::{Context, Decoder, EncodedMessage};
 use byteorder::{LittleEndian, ReadBytesExt};
 use log::{info, warn};
-use prometheus::{Gauge, IntCounter, Registry, TextEncoder};
+use prometheus::{Encoder as PromEncoder, Gauge, IntCounter, Registry, TextEncoder};
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +53,21 @@ fn parse_raw(data: &[u8]) -> Option<SensorPayload> {
         pressure_pa: pressure,
         timestamp_ms: ts,
         sequence: seq,
+    })
+}
+
+/// Reconstruct a SensorPayload from alec decode_multi output.
+/// Field indices: 0=temp_x100, 1=hum_x100, 2=pressure_pa, 3=timestamp_ms, 4=sequence
+fn payload_from_fields(fields: &[(u8, f64)]) -> Option<SensorPayload> {
+    if fields.len() < 5 {
+        return None;
+    }
+    Some(SensorPayload {
+        temperature_c: fields[0].1 / 100.0,
+        humidity_rh: fields[1].1 / 100.0,
+        pressure_pa: fields[2].1 as u32,
+        timestamp_ms: fields[3].1 as i64,
+        sequence: fields[4].1 as u32,
     })
 }
 
@@ -123,7 +139,7 @@ impl Metrics {
 
 fn start_metrics_server(port: u16, registry: Arc<Registry>) {
     std::thread::spawn(move || {
-        let addr = format!("0.0.0.0:{}", port);
+        let addr = format!("0.0.0.0:{port}");
         let server = tiny_http::Server::http(&addr).expect("failed to bind metrics server");
         info!("Metrics server listening on {}", addr);
         let encoder = TextEncoder::new();
@@ -132,143 +148,156 @@ fn start_metrics_server(port: u16, registry: Arc<Registry>) {
             let mut buf = Vec::new();
             encoder.encode(&metric_families, &mut buf).unwrap();
             let resp = tiny_http::Response::from_data(buf)
-                .with_header("Content-Type: text/plain; charset=utf-8".parse().unwrap());
+                .with_header("Content-Type: text/plain; charset=utf-8".parse::<tiny_http::Header>().unwrap());
             let _ = req.respond(resp);
         }
     });
 }
 
 // ---------------------------------------------------------------------------
-//  MQTT loop
+//  MQTT loop (rumqttc async)
 // ---------------------------------------------------------------------------
 
-fn run(broker: &str, metrics: &Metrics) {
-    let create_opts = paho_mqtt::CreateOptionsBuilder::new()
-        .server_uri(broker)
-        .client_id("alec-decoder")
-        .finalize();
-
-    let cli = paho_mqtt::Client::new(create_opts).expect("failed to create MQTT client");
-
-    let conn_opts = paho_mqtt::ConnectOptionsBuilder::new()
-        .keep_alive_interval(Duration::from_secs(30))
-        .clean_session(true)
-        .automatic_reconnect(Duration::from_secs(1), Duration::from_secs(30))
-        .finalize();
-
-    let rx = cli.start_consuming();
-
-    info!("Connecting to MQTT broker at {} ...", broker);
-    loop {
-        match cli.connect(conn_opts.clone()) {
-            Ok(_) => break,
-            Err(e) => {
-                warn!("MQTT connect failed: {} — retrying in 3s", e);
-                std::thread::sleep(Duration::from_secs(3));
-            }
+fn parse_broker(env_val: &str) -> (String, u16) {
+    let stripped = env_val
+        .trim()
+        .strip_prefix("tcp://")
+        .unwrap_or(env_val.trim());
+    match stripped.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port = port_str.parse::<u16>().unwrap_or(1883);
+            (host.to_string(), port)
         }
+        None => (stripped.to_string(), 1883),
     }
-    info!("Connected to MQTT broker");
+}
 
-    cli.subscribe_many(&[TOPIC_DEMO, TOPIC_RAW], &[1, 1])
-        .expect("failed to subscribe to topics");
+fn update_metrics_from_reading(metrics: &Metrics, reading: &SensorPayload, wire_len: usize) {
+    metrics.temperature.set(reading.temperature_c);
+    metrics.humidity.set(reading.humidity_rh);
+    metrics.pressure.set(reading.pressure_pa as f64);
+
+    let json_equiv = format!(
+        "{{\"t\":{:.2},\"rh\":{:.2},\"p\":{},\"ts\":{},\"seq\":{}}}",
+        reading.temperature_c,
+        reading.humidity_rh,
+        reading.pressure_pa,
+        reading.timestamp_ms,
+        reading.sequence,
+    );
+    metrics.json_bytes.set(json_equiv.len() as f64);
+
+    info!(
+        "t={:.2}°C rh={:.2}% pa={}Pa wire={}B json={}B",
+        reading.temperature_c,
+        reading.humidity_rh,
+        reading.pressure_pa,
+        wire_len,
+        json_equiv.len(),
+    );
+}
+
+async fn run(host: &str, port: u16, metrics: &Metrics) {
+    let mut mqttoptions = MqttOptions::new("alec-decoder", host, port);
+    mqttoptions.set_keep_alive(Duration::from_secs(30));
+    mqttoptions.set_clean_session(true);
+
+    let (client, mut eventloop) = AsyncClient::new(mqttoptions, 64);
+
+    info!("Connecting to MQTT broker at {}:{} ...", host, port);
+
+    client
+        .subscribe(TOPIC_DEMO, QoS::AtLeastOnce)
+        .await
+        .expect("failed to subscribe to demo topic");
+    client
+        .subscribe(TOPIC_RAW, QoS::AtLeastOnce)
+        .await
+        .expect("failed to subscribe to raw topic");
     info!("Subscribed to {} and {}", TOPIC_DEMO, TOPIC_RAW);
 
-    // Single shared ALEC context maintained across all messages (server-side state)
-    let mut ctx = Context::new();
+    let ctx = Context::new();
     let mut decoder = Decoder::new();
 
-    for msg in rx.iter() {
-        if let Some(msg) = msg {
-            let topic = msg.topic();
-            let payload = msg.payload();
-            let wire_len = payload.len();
-            metrics.message_count.inc();
+    loop {
+        match eventloop.poll().await {
+            Ok(Event::Incoming(Packet::Publish(publish))) => {
+                let topic = &publish.topic;
+                let payload = &publish.payload;
+                let wire_len = payload.len();
+                metrics.message_count.inc();
 
-            match topic {
-                TOPIC_DEMO => {
-                    // ALEC-compressed payload
-                    metrics.compressed_bytes.set(wire_len as f64);
+                match topic.as_str() {
+                    TOPIC_DEMO => {
+                        metrics.compressed_bytes.set(wire_len as f64);
 
-                    let raw = decoder.decode(payload, &mut ctx);
-                    let raw_len = raw.len();
-                    metrics.raw_bytes.set(raw_len as f64);
-                    if wire_len > 0 {
-                        metrics
-                            .compression_ratio
-                            .set(raw_len as f64 / wire_len as f64);
-                    }
+                        let msg = match EncodedMessage::from_bytes(payload) {
+                            Some(m) => m,
+                            None => {
+                                warn!("Could not parse ALEC message ({} bytes)", wire_len);
+                                continue;
+                            }
+                        };
 
-                    match parse_raw(&raw) {
-                        Some(reading) => {
-                            metrics.temperature.set(reading.temperature_c);
-                            metrics.humidity.set(reading.humidity_rh);
-                            metrics.pressure.set(reading.pressure_pa as f64);
+                        match decoder.decode_multi(&msg, &ctx) {
+                            Ok(fields) => {
+                                metrics.raw_bytes.set(RAW_PAYLOAD_SIZE as f64);
+                                if wire_len > 0 {
+                                    metrics
+                                        .compression_ratio
+                                        .set(RAW_PAYLOAD_SIZE as f64 / wire_len as f64);
+                                }
 
-                            let json_equiv = format!(
-                                "{{\"t\":{:.2},\"rh\":{:.2},\"p\":{},\"ts\":{},\"seq\":{}}}",
-                                reading.temperature_c,
-                                reading.humidity_rh,
-                                reading.pressure_pa,
-                                reading.timestamp_ms,
-                                reading.sequence,
-                            );
-                            metrics.json_bytes.set(json_equiv.len() as f64);
-
-                            info!(
-                                "ALEC t={:.2}°C rh={:.2}% pa={}Pa wire={}B raw={}B json={}B ratio={:.1}x",
-                                reading.temperature_c,
-                                reading.humidity_rh,
-                                reading.pressure_pa,
-                                wire_len,
-                                raw_len,
-                                json_equiv.len(),
-                                raw_len as f64 / wire_len as f64
-                            );
-                        }
-                        None => {
-                            warn!(
-                                "ALEC decoded {} bytes but could not parse sensor struct",
-                                raw_len
-                            );
+                                match payload_from_fields(&fields) {
+                                    Some(reading) => {
+                                        info!(
+                                            "ALEC decoded {} fields, ratio={:.1}x",
+                                            fields.len(),
+                                            RAW_PAYLOAD_SIZE as f64 / wire_len as f64
+                                        );
+                                        update_metrics_from_reading(metrics, &reading, wire_len);
+                                    }
+                                    None => {
+                                        warn!(
+                                            "ALEC decoded {} fields but expected >= 5",
+                                            fields.len()
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("ALEC decode_multi failed: {} ({} bytes)", e, wire_len);
+                            }
                         }
                     }
-                }
-                TOPIC_RAW => {
-                    // Uncompressed raw binary struct (for comparison)
-                    metrics.raw_bytes.set(wire_len as f64);
-                    metrics.compressed_bytes.set(wire_len as f64);
-                    metrics.compression_ratio.set(1.0);
+                    TOPIC_RAW => {
+                        metrics.raw_bytes.set(wire_len as f64);
+                        metrics.compressed_bytes.set(wire_len as f64);
+                        metrics.compression_ratio.set(1.0);
 
-                    match parse_raw(payload) {
-                        Some(reading) => {
-                            metrics.temperature.set(reading.temperature_c);
-                            metrics.humidity.set(reading.humidity_rh);
-                            metrics.pressure.set(reading.pressure_pa as f64);
-                            info!(
-                                "RAW  seq={} t={:.2}°C rh={:.2}% pa={}Pa wire={}B",
-                                reading.sequence,
-                                reading.temperature_c,
-                                reading.humidity_rh,
-                                reading.pressure_pa,
-                                wire_len
-                            );
-                        }
-                        None => {
-                            warn!(
-                                "Could not parse raw payload ({} bytes) — skipping",
-                                wire_len
-                            );
+                        match parse_raw(payload) {
+                            Some(reading) => {
+                                info!("RAW  seq={}", reading.sequence);
+                                update_metrics_from_reading(metrics, &reading, wire_len);
+                            }
+                            None => {
+                                warn!(
+                                    "Could not parse raw payload ({} bytes) — skipping",
+                                    wire_len
+                                );
+                            }
                         }
                     }
-                }
-                _ => {
-                    warn!("Unexpected topic: {}", topic);
+                    other => {
+                        warn!("Unexpected topic: {}", other);
+                    }
                 }
             }
-        } else if !cli.is_connected() {
-            warn!("Lost connection — waiting for reconnect...");
-            std::thread::sleep(Duration::from_secs(1));
+            Ok(_) => {}
+            Err(e) => {
+                warn!("MQTT error: {} — reconnecting in 3s", e);
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
         }
     }
 }
@@ -277,13 +306,16 @@ fn run(broker: &str, metrics: &Metrics) {
 //  Main
 // ---------------------------------------------------------------------------
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let broker = std::env::var("MQTT_BROKER_EXTERNAL")
+    let broker_raw = std::env::var("MQTT_BROKER_EXTERNAL")
         .or_else(|_| std::env::var("MQTT_BROKER"))
-        .unwrap_or_else(|_| "tcp://localhost:1883".into());
-    let port: u16 = std::env::var("METRICS_PORT")
+        .unwrap_or_else(|_| "localhost:1883".into());
+    let (host, mqtt_port) = parse_broker(&broker_raw);
+
+    let metrics_port: u16 = std::env::var("METRICS_PORT")
         .unwrap_or_else(|_| "9100".into())
         .parse()
         .expect("METRICS_PORT must be a u16");
@@ -293,7 +325,7 @@ fn main() {
     let registry = Arc::new(Registry::new());
     let metrics = Metrics::new(&registry);
 
-    start_metrics_server(port, registry);
+    start_metrics_server(metrics_port, registry);
 
-    run(&broker, &metrics);
+    run(&host, mqtt_port, &metrics).await;
 }
