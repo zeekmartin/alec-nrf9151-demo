@@ -15,6 +15,7 @@ services:
       - mosquitto
     environment:
       MQTT_BROKER: "tcp://mosquitto:1883"
+      MQTT_BROKER_EXTERNAL: "tcp://broker.hivemq.com:1883"
       MQTT_TOPIC: "alec/sensor/demo"
       METRICS_PORT: "9100"
     ports:

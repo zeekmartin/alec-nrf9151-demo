@@ -124,6 +124,27 @@
         "textMode": "auto",
         "reduceOptions": { "calcs": ["lastNotNull"] }
       }
+    },
+    {
+      "id": 5,
+      "title": "Savings vs JSON (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "(1 - alec_payload_compressed_bytes / alec_payload_json_bytes) * 100",
+          "legendFormat": "Savings vs JSON (%)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "fillOpacity": 20, "lineWidth": 2 }
+        }
+      }
     }
   ],
   "templating": { "list": [] },
