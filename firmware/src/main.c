@@ -327,8 +327,9 @@ static int publish_reading(const struct sensor_payload *p)
 	size_t raw_len = sizeof(*p);
 
 	/*
-	 * v1.3 encode_multi: shared header + per-channel adaptive encoding.
-	 * P1-P4 channels are included; P5 (Disposable) update context only.
+	 * v1.3.1 encode_multi: shared 10B header + per-channel adaptive encoding.
+	 * name_id now serialized as u8 (1B/channel, was 2B in v1.3.0).
+	 * P1-P4 channels included; P5 (Disposable) updates context only.
 	 */
 
 	double values[ALEC_N_CHANNELS];
@@ -357,20 +358,47 @@ static int publish_reading(const struct sensor_payload *p)
 	AlecResult rc = alec_encode_multi(
 		alec_enc,
 		values, ALEC_N_CHANNELS,
-		timestamps, /* per-channel timestamps */
-		source_ids, /* per-channel source_ids */
-		priorities, /* per-channel priorities */
+		timestamps,
+		source_ids,
+		priorities,
 		compressed, sizeof(compressed),
 		&compressed_len);
 
 	if (rc == ALEC_OK && compressed_len > 0)
 	{
-		LOG_INF("ALEC %u->%uB (%.0f%%) seq=%u t=%d rh=%u pa=%u",
-				(unsigned)raw_len, (unsigned)compressed_len,
-				(double)(100.0 * (1.0 - (double)compressed_len / (double)raw_len)),
+		/* Compute equivalent JSON size for reference:
+		 * {"t":XX.XX,"rh":YY.YY,"p":PPPPPP,"ts":TTTTTTTTTTTTT,"seq":SSS}
+		 */
+		char json_buf[96];
+		int json_len = snprintf(json_buf, sizeof(json_buf),
+								"{\"t\":%.2f,\"rh\":%.2f,\"p\":%u,\"ts\":%lld,\"seq\":%u}",
+								(double)p->temperature_c_x100 / 100.0,
+								(double)p->humidity_rh_x100 / 100.0,
+								(unsigned)p->pressure_pa,
+								(long long)p->timestamp_ms,
+								(unsigned)p->sequence);
+		if (json_len < 0)
+		{
+			json_len = 0;
+		}
+
+		double vs_raw = 100.0 * (1.0 - (double)compressed_len / (double)raw_len);
+		double vs_json = 100.0 * (1.0 - (double)compressed_len / (double)json_len);
+
+		LOG_INF("────────────────────────────────────");
+		LOG_INF("ALEC v1.3.1  seq=%-4u  t=%.2f°C  rh=%.2f%%  p=%u Pa",
 				p->sequence,
-				p->temperature_c_x100, p->humidity_rh_x100,
-				p->pressure_pa);
+				(double)p->temperature_c_x100 / 100.0,
+				(double)p->humidity_rh_x100 / 100.0,
+				(unsigned)p->pressure_pa);
+		LOG_INF("  JSON  equiv : %d B", json_len);
+		LOG_INF("  Raw   struct: %u B", (unsigned)raw_len);
+		LOG_INF("  ALEC  output: %u B", (unsigned)compressed_len);
+		LOG_INF("  Saved vs JSON  : %.0f%%  (%d B → %u B)",
+				vs_json, json_len, (unsigned)compressed_len);
+		LOG_INF("  Saved vs raw   : %.0f%%  (%u B → %u B)",
+				vs_raw, (unsigned)raw_len, (unsigned)compressed_len);
+		LOG_INF("────────────────────────────────────");
 
 		err = mqtt_pub(MQTT_TOPIC_DEMO, compressed, compressed_len,
 					   seq_num * 2);
