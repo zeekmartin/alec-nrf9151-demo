@@ -6,9 +6,9 @@
 ///!
 ///! Exposes Prometheus metrics on :9100/metrics.
 
-use alec::{Context, Decoder, Encoder};
+use alec::{Context, Decoder};
 use byteorder::{LittleEndian, ReadBytesExt};
-use log::{error, info, warn};
+use log::{info, warn};
 use prometheus::{Gauge, IntCounter, Registry, TextEncoder};
 use std::io::Cursor;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ const TOPIC_DEMO: &str = "alec/sensor/demo";
 const TOPIC_RAW: &str = "alec/sensor/raw";
 
 // ---------------------------------------------------------------------------
-//  Sensor payload (mirrors firmware struct sensor_payload, 18 bytes packed)
+//  Sensor payload (mirrors firmware struct sensor_payload, 20 bytes packed)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -34,7 +34,7 @@ struct SensorPayload {
     sequence: u32,
 }
 
-const RAW_PAYLOAD_SIZE: usize = 18; // i16+u16+u32+i64+u32
+const RAW_PAYLOAD_SIZE: usize = 20; // i16(2)+u16(2)+u32(4)+i64(8)+u32(4)
 
 fn parse_raw(data: &[u8]) -> Option<SensorPayload> {
     if data.len() < RAW_PAYLOAD_SIZE {
@@ -63,6 +63,7 @@ struct Metrics {
     raw_bytes: Gauge,
     compressed_bytes: Gauge,
     compression_ratio: Gauge,
+    json_bytes: Gauge,
     temperature: Gauge,
     humidity: Gauge,
     pressure: Gauge,
@@ -83,6 +84,11 @@ impl Metrics {
                 "Compression ratio (raw / compressed)",
             )
             .unwrap(),
+            json_bytes: Gauge::new(
+                "alec_payload_json_bytes",
+                "Equivalent JSON payload size in bytes",
+            )
+            .unwrap(),
             temperature: Gauge::new("alec_temperature", "Decoded temperature in °C").unwrap(),
             humidity: Gauge::new("alec_humidity", "Decoded humidity in %RH").unwrap(),
             pressure: Gauge::new("alec_pressure", "Decoded pressure in Pa").unwrap(),
@@ -95,6 +101,9 @@ impl Metrics {
             .unwrap();
         registry
             .register(Box::new(m.compression_ratio.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(m.json_bytes.clone()))
             .unwrap();
         registry
             .register(Box::new(m.temperature.clone()))
@@ -195,13 +204,25 @@ fn run(broker: &str, metrics: &Metrics) {
                             metrics.temperature.set(reading.temperature_c);
                             metrics.humidity.set(reading.humidity_rh);
                             metrics.pressure.set(reading.pressure_pa as f64);
+
+                            let json_equiv = format!(
+                                "{{\"t\":{:.2},\"rh\":{:.2},\"p\":{},\"ts\":{},\"seq\":{}}}",
+                                reading.temperature_c,
+                                reading.humidity_rh,
+                                reading.pressure_pa,
+                                reading.timestamp_ms,
+                                reading.sequence,
+                            );
+                            metrics.json_bytes.set(json_equiv.len() as f64);
+
                             info!(
-                                "ALEC t={:.2}°C rh={:.2}% pa={}Pa wire={}B raw={}B ratio={:.1}x",
+                                "ALEC t={:.2}°C rh={:.2}% pa={}Pa wire={}B raw={}B json={}B ratio={:.1}x",
                                 reading.temperature_c,
                                 reading.humidity_rh,
                                 reading.pressure_pa,
                                 wire_len,
                                 raw_len,
+                                json_equiv.len(),
                                 raw_len as f64 / wire_len as f64
                             );
                         }
@@ -259,7 +280,9 @@ fn run(broker: &str, metrics: &Metrics) {
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let broker = std::env::var("MQTT_BROKER").unwrap_or_else(|_| "tcp://localhost:1883".into());
+    let broker = std::env::var("MQTT_BROKER_EXTERNAL")
+        .or_else(|_| std::env::var("MQTT_BROKER"))
+        .unwrap_or_else(|_| "tcp://localhost:1883".into());
     let port: u16 = std::env::var("METRICS_PORT")
         .unwrap_or_else(|_| "9100".into())
         .parse()
