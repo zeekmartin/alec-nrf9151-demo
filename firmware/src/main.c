@@ -447,9 +447,48 @@ static int publish_reading(const struct sensor_payload *p)
 
 int main(void)
 {
-	int err;
+	printk("=== MAIN START ===\n");
+	k_sleep(K_SECONDS(1));
+	printk("=== AFTER SLEEP ===\n");
 
-	k_sleep(K_SECONDS(3));
+	printk("=== CALLING alec_version ===\n");
+	const char *ver = alec_version();
+	printk("=== alec_version: %s ===\n", ver ? ver : "NULL");
+
+	printk("=== CALLING alec_encoder_new_with_config ===\n");
+	AlecEncoderConfig alec_cfg = {
+		.history_size      = 20,
+		.max_patterns      = 256,
+		.max_memory_bytes  = 2048,
+		.keyframe_interval = 50,
+		.smart_resync      = true,
+	};
+	alec_enc = alec_encoder_new_with_config(&alec_cfg);
+	printk("=== alec_encoder_new_with_config: %p ===\n",
+	       (void *)alec_enc);
+
+	if (!alec_enc) {
+		printk("=== ENCODER NULL — halting ===\n");
+		return -ENOMEM;
+	}
+	printk("=== ENCODER OK ===\n");
+
+	printk("=== CALLING alec_encode_multi_fixed self-test ===\n");
+	double test_vals[5] = {100.0, 26.9, 58.5, 641.0, 1007.7};
+	uint8_t test_out[32];
+	size_t test_len = 0;
+	AlecResult test_rc = alec_encode_multi_fixed(
+		alec_enc,
+		test_vals, 5,
+		test_out, sizeof(test_out),
+		&test_len);
+	printk("=== self-test rc=%d len=%u marker=0x%02X ===\n",
+	       (int)test_rc, (unsigned)test_len,
+	       test_len > 0 ? test_out[0] : 0);
+
+	printk("=== ENTERING LOG SYSTEM ===\n");
+
+	int err;
 
 	/*
 	 * NOTE: alec_heap_init() crashes on Zephyr/nRF9151 — the alec-ffi
@@ -462,50 +501,8 @@ int main(void)
 	LOG_INF("ALEC NB-IoT Sensor Demo starting (alec-ffi %s)",
 			alec_version());
 
-	/* 0. ALEC encoder — diagnostic */
 	LOG_INF("Heap pool size: %d bytes", CONFIG_HEAP_MEM_POOL_SIZE);
-	LOG_INF("Calling alec_encoder_new_with_config()...");
-
-	AlecEncoderConfig alec_cfg = {
-		.history_size      = 20,
-		.max_patterns      = 256,
-		.max_memory_bytes  = 2048,
-		.keyframe_interval = 50,
-		.smart_resync      = true,
-	};
-	alec_enc = alec_encoder_new_with_config(&alec_cfg);
-
-	LOG_INF("alec_encoder_new_with_config returned: %p", (void *)alec_enc);
-
-	if (!alec_enc)
-	{
-		LOG_ERR("Failed to create ALEC encoder — halting");
-		LOG_ERR("Increase CONFIG_HEAP_MEM_POOL_SIZE (currently %d)",
-				CONFIG_HEAP_MEM_POOL_SIZE);
-		return -ENOMEM;
-	}
-
 	LOG_INF("ALEC encoder initialised OK");
-
-	/* Self-test: fixed-channel encode to verify encoder is functional */
-	{
-		double test_vals[ALEC_N_CHANNELS] = {
-			100.0, 26.9, 58.5, 641.0, 1007.7};
-		uint8_t test_out[32];
-		size_t test_len = 0;
-		AlecResult test_rc = alec_encode_multi_fixed(
-			alec_enc,
-			test_vals, ALEC_N_CHANNELS,
-			test_out, sizeof(test_out),
-			&test_len);
-		if (test_rc != ALEC_OK)
-		{
-			LOG_ERR("ALEC self-test failed: rc=%d", (int)test_rc);
-			return -ENOMEM;
-		}
-		LOG_INF("ALEC self-test OK: %uB output, marker=0x%02X",
-				(unsigned)test_len, test_out[0]);
-	}
 
 	/* 1. LTE */
 	err = lte_connect();
