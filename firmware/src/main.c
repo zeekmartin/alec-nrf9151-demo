@@ -47,11 +47,11 @@ LOG_MODULE_REGISTER(alec_demo, LOG_LEVEL_INF);
 
 struct sensor_payload
 {
-	double battery;     /* % — always 100.0 in sim */
+	double battery;		/* % — always 100.0 in sim */
 	double temperature; /* °C — range 24.0-27.0    */
-	double humidity;    /* %RH — range 55.0-65.0   */
-	double co2;         /* ppm — range 400.0-650.0 */
-	double pressure;    /* hPa — range 1005.0-1010.0 */
+	double humidity;	/* %RH — range 55.0-65.0   */
+	double co2;			/* ppm — range 400.0-650.0 */
+	double pressure;	/* hPa — range 1005.0-1010.0 */
 };
 
 /* ------------------------------------------------------------------ */
@@ -244,21 +244,21 @@ static void mqtt_process(void)
 /* ------------------------------------------------------------------ */
 
 /* Milesight EM500-CO2 profile — slow drift, highly periodic. */
-static double sim_battery  = 100.0;  /* %, constant */
-static double sim_temp     = 26.9;   /* °C */
-static double sim_humidity = 58.5;   /* %RH */
-static double sim_co2      = 641.0;  /* ppm */
+static double sim_battery = 100.0;	 /* %, constant */
+static double sim_temp = 26.9;		 /* °C */
+static double sim_humidity = 58.5;	 /* %RH */
+static double sim_co2 = 641.0;		 /* ppm */
 static double sim_pressure = 1007.7; /* hPa */
 
 /* Deterministic drift tables — no rand32, repeating 16-step cycle. */
 /* Temperature: ±0.1°C random walk. */
 static const double drift_temp[] = {
-	 0.1, -0.1,  0.0,  0.1,  0.0, -0.1,  0.1,  0.0,
-	-0.1,  0.0,  0.1, -0.1,  0.0,  0.0,  0.1, -0.1};
+	0.1, -0.1, 0.0, 0.1, 0.0, -0.1, 0.1, 0.0,
+	-0.1, 0.0, 0.1, -0.1, 0.0, 0.0, 0.1, -0.1};
 /* Humidity: ±0.5%RH random walk. */
 static const double drift_rh[] = {
-	 0.5, -0.5,  0.0, -0.5,  0.5,  0.0,  0.5, -0.5,
-	-0.5,  0.0,  0.5,  0.5, -0.5,  0.0, -0.5,  0.5};
+	0.5, -0.5, 0.0, -0.5, 0.5, 0.0, 0.5, -0.5,
+	-0.5, 0.0, 0.5, 0.5, -0.5, 0.0, -0.5, 0.5};
 /* CO2: trend -1.5/step + noise ±1.0 → range [-2.5, -0.5]. */
 static const double drift_co2[] = {
 	-1.0, -2.0, -1.5, -0.5, -1.5, -2.5, -1.0, -1.5,
@@ -306,11 +306,11 @@ static void simulate_reading(struct sensor_payload *p)
 
 	drift_idx++;
 
-	p->battery     = sim_battery;
+	p->battery = sim_battery;
 	p->temperature = sim_temp;
-	p->humidity    = sim_humidity;
-	p->co2         = sim_co2;
-	p->pressure    = sim_pressure;
+	p->humidity = sim_humidity;
+	p->co2 = sim_co2;
+	p->pressure = sim_pressure;
 
 	seq_num++;
 }
@@ -448,7 +448,7 @@ static int publish_reading(const struct sensor_payload *p)
 int main(void)
 {
 	printk("=== MAIN START ===\n");
-	k_sleep(K_SECONDS(1));
+
 	printk("=== AFTER SLEEP ===\n");
 
 	printk("=== CALLING alec_version ===\n");
@@ -457,17 +457,18 @@ int main(void)
 
 	printk("=== CALLING alec_encoder_new_with_config ===\n");
 	AlecEncoderConfig alec_cfg = {
-		.history_size      = 20,
-		.max_patterns      = 256,
-		.max_memory_bytes  = 2048,
+		.history_size = 20,
+		.max_patterns = 256,
+		.max_memory_bytes = 2048,
 		.keyframe_interval = 50,
-		.smart_resync      = true,
+		.smart_resync = true,
 	};
 	alec_enc = alec_encoder_new_with_config(&alec_cfg);
 	printk("=== alec_encoder_new_with_config: %p ===\n",
-	       (void *)alec_enc);
+		   (void *)alec_enc);
 
-	if (!alec_enc) {
+	if (!alec_enc)
+	{
 		printk("=== ENCODER NULL — halting ===\n");
 		return -ENOMEM;
 	}
@@ -483,8 +484,8 @@ int main(void)
 		test_out, sizeof(test_out),
 		&test_len);
 	printk("=== self-test rc=%d len=%u marker=0x%02X ===\n",
-	       (int)test_rc, (unsigned)test_len,
-	       test_len > 0 ? test_out[0] : 0);
+		   (int)test_rc, (unsigned)test_len,
+		   test_len > 0 ? test_out[0] : 0);
 
 	printk("=== ENTERING LOG SYSTEM ===\n");
 
