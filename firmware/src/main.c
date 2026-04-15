@@ -250,23 +250,25 @@ static double sim_humidity = 58.5;	 /* %RH */
 static double sim_co2 = 641.0;		 /* ppm */
 static double sim_pressure = 1007.7; /* hPa */
 
-/* Deterministic drift tables — no rand32, repeating 16-step cycle. */
-/* Temperature: ±0.1°C random walk. */
+/* Deterministic drift tables — no rand32, repeating 16-step cycle.
+ * Values tuned to the real EM500-CO2 99-message dataset:
+ *   58% Repeated / 42% Delta8 → steady-state ~7-9B per frame. */
+/* Temperature: avg -0.025°C/step (target -0.02), mostly 0.0. */
 static const double drift_temp[] = {
-	0.1, -0.1, 0.0, 0.1, 0.0, -0.1, 0.1, 0.0,
-	-0.1, 0.0, 0.1, -0.1, 0.0, 0.0, 0.1, -0.1};
-/* Humidity: ±0.5%RH random walk. */
+	 0.0, -0.1,  0.0,  0.0, -0.1,  0.0,  0.0,  0.0,
+	 0.0, -0.1,  0.0,  0.0,  0.0, -0.1,  0.0,  0.0};
+/* Humidity: avg -0.0625%/step (target -0.05), mostly 0.0. */
 static const double drift_rh[] = {
-	0.5, -0.5, 0.0, -0.5, 0.5, 0.0, 0.5, -0.5,
-	-0.5, 0.0, 0.5, 0.5, -0.5, 0.0, -0.5, 0.5};
-/* CO2: trend -1.5/step + noise ±1.0 → range [-2.5, -0.5]. */
+	 0.0,  0.0, -0.5,  0.0,  0.0,  0.0,  0.5,  0.0,
+	 0.0, -0.5,  0.0,  0.0,  0.0,  0.0, -0.5,  0.0};
+/* CO2: avg -2.0ppm/step, steady downward (always changes → Delta8). */
 static const double drift_co2[] = {
-	-1.0, -2.0, -1.5, -0.5, -1.5, -2.5, -1.0, -1.5,
-	-2.0, -1.0, -1.5, -0.5, -1.5, -2.5, -1.0, -2.0};
-/* Pressure: trend -0.1/step + noise ±0.05 → range [-0.15, -0.05]. */
+	-2.0, -1.0, -2.0, -3.0, -2.0, -1.0, -2.0, -2.0,
+	-3.0, -2.0, -1.0, -2.0, -2.0, -3.0, -1.0, -2.0};
+/* Pressure: avg -0.025hPa/step (target -0.027), very slow. */
 static const double drift_press[] = {
-	-0.10, -0.05, -0.10, -0.15, -0.10, -0.05, -0.10, -0.10,
-	-0.15, -0.10, -0.05, -0.10, -0.10, -0.15, -0.05, -0.10};
+	 0.0, -0.1,  0.0,  0.0, -0.1,  0.0,  0.0,  0.0,
+	 0.0, -0.1,  0.0,  0.0, -0.1,  0.0,  0.0,  0.0};
 static uint8_t drift_idx = 0;
 
 static void simulate_reading(struct sensor_payload *p)
