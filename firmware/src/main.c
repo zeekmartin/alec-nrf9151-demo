@@ -1,12 +1,15 @@
 /*
  * ALEC NB-IoT Sensor Demo — nRF9151
  *
- * Sends a simulated sensor reading (temperature, humidity, pressure,
- * timestamp, sequence number) over NB-IoT / MQTT every 60 seconds.
+ * Sends a simulated Milesight EM500-CO2 reading (battery, temperature,
+ * humidity, CO2, pressure) over NB-IoT / MQTT every PUBLISH_INTERVAL_S
+ * seconds. Uses ALEC v1.3.5 fixed-channel encoding with an 11-byte
+ * LoRaWAN-style ceiling; falls back to raw struct if the encoded frame
+ * exceeds that ceiling (notably cold-start and keyframe messages).
  *
  * Publishes to two topics:
- *   alec/sensor/demo — ALEC-compressed payload
- *   alec/sensor/raw  — uncompressed raw struct (for comparison)
+ *   alec/sensor/demo — ALEC-compressed payload (or raw on fallback)
+ *   alec/sensor/raw  — uncompressed raw struct (always, for comparison)
  */
 
 #include <zephyr/kernel.h>
@@ -39,17 +42,17 @@ LOG_MODULE_REGISTER(alec_demo, LOG_LEVEL_INF);
 #define PUBLISH_INTERVAL_S 5
 
 /* ------------------------------------------------------------------ */
-/*  Sensor payload (binary struct, packed)                             */
+/*  Sensor payload — 5× f64 EM500-CO2 channels (matches ALEC values[]) */
 /* ------------------------------------------------------------------ */
 
 struct sensor_payload
 {
-	int16_t temperature_c_x100; /* °C × 100   (e.g. 2350 = 23.50°C) */
-	uint16_t humidity_rh_x100;	/* %RH × 100  (e.g. 5520 = 55.20%)  */
-	uint32_t pressure_pa;		/* Pa          (e.g. 101325)         */
-	int64_t timestamp_ms;		/* Unix epoch ms                     */
-	uint32_t sequence;			/* Monotonic counter                 */
-} __packed;
+	double battery;     /* % — always 100.0 in sim */
+	double temperature; /* °C — range 24.0-27.0    */
+	double humidity;    /* %RH — range 55.0-65.0   */
+	double co2;         /* ppm — range 400.0-650.0 */
+	double pressure;    /* hPa — range 1005.0-1010.0 */
+};
 
 /* ------------------------------------------------------------------ */
 /*  Globals                                                            */
@@ -240,50 +243,76 @@ static void mqtt_process(void)
 /*  Sensor simulation                                                  */
 /* ------------------------------------------------------------------ */
 
-static int16_t sim_temp_x100 = 2400;   /* 24.00°C */
-static uint16_t sim_rh_x100 = 6000;	   /* 60.00%RH */
-static uint32_t sim_press_pa = 101000; /* 1010.00 hPa */
+/* Milesight EM500-CO2 profile — slow drift, highly periodic. */
+static double sim_battery  = 100.0;  /* %, constant */
+static double sim_temp     = 26.9;   /* °C */
+static double sim_humidity = 58.5;   /* %RH */
+static double sim_co2      = 641.0;  /* ppm */
+static double sim_pressure = 1007.7; /* hPa */
 
-/* Deterministic drift table — no rand32, repeating cycle of 16 steps */
-static const int8_t drift_temp[] = {1, -1, 0, 1, 0, -1, 1, 0, -1, 0, 1, -1, 0, 0, 1, -1};
-static const int8_t drift_rh[] = {2, -1, 0, -2, 1, 0, 2, -1, -2, 0, 1, 2, -1, 0, -1, 1};
-static const int8_t drift_press[] = {1, 0, -1, 1, 0, 0, -1, 1, 0, -1, 1, 0, -1, 0, 1, 0};
+/* Deterministic drift tables — no rand32, repeating 16-step cycle. */
+/* Temperature: ±0.1°C random walk. */
+static const double drift_temp[] = {
+	 0.1, -0.1,  0.0,  0.1,  0.0, -0.1,  0.1,  0.0,
+	-0.1,  0.0,  0.1, -0.1,  0.0,  0.0,  0.1, -0.1};
+/* Humidity: ±0.5%RH random walk. */
+static const double drift_rh[] = {
+	 0.5, -0.5,  0.0, -0.5,  0.5,  0.0,  0.5, -0.5,
+	-0.5,  0.0,  0.5,  0.5, -0.5,  0.0, -0.5,  0.5};
+/* CO2: trend -1.5/step + noise ±1.0 → range [-2.5, -0.5]. */
+static const double drift_co2[] = {
+	-1.0, -2.0, -1.5, -0.5, -1.5, -2.5, -1.0, -1.5,
+	-2.0, -1.0, -1.5, -0.5, -1.5, -2.5, -1.0, -2.0};
+/* Pressure: trend -0.1/step + noise ±0.05 → range [-0.15, -0.05]. */
+static const double drift_press[] = {
+	-0.10, -0.05, -0.10, -0.15, -0.10, -0.05, -0.10, -0.10,
+	-0.15, -0.10, -0.05, -0.10, -0.10, -0.15, -0.05, -0.10};
 static uint8_t drift_idx = 0;
 
 static void simulate_reading(struct sensor_payload *p)
 {
 	uint8_t i = drift_idx % 16;
 
-	sim_temp_x100 += drift_temp[i];
-	if (sim_temp_x100 < 2350)
-		sim_temp_x100 = 2350;
-	if (sim_temp_x100 > 2450)
-		sim_temp_x100 = 2450;
+	/* Battery: constant. */
+	sim_battery = 100.0;
 
-	int32_t rh = (int32_t)sim_rh_x100 + drift_rh[i];
-	if (rh < 5800)
-		rh = 5800;
-	if (rh > 6200)
-		rh = 6200;
-	sim_rh_x100 = (uint16_t)rh;
+	/* Temperature: random walk, clamp [24.0, 27.0]. */
+	sim_temp += drift_temp[i];
+	if (sim_temp < 24.0)
+		sim_temp = 24.0;
+	if (sim_temp > 27.0)
+		sim_temp = 27.0;
 
-	int32_t pa = (int32_t)sim_press_pa + drift_press[i];
-	if (pa < 100800)
-		pa = 100800;
-	if (pa > 101200)
-		pa = 101200;
-	sim_press_pa = (uint32_t)pa;
+	/* Humidity: random walk, clamp [55.0, 65.0]. */
+	sim_humidity += drift_rh[i];
+	if (sim_humidity < 55.0)
+		sim_humidity = 55.0;
+	if (sim_humidity > 65.0)
+		sim_humidity = 65.0;
+
+	/* CO2: slow downward drift, clamp [400.0, 700.0]. */
+	sim_co2 += drift_co2[i];
+	if (sim_co2 < 400.0)
+		sim_co2 = 400.0;
+	if (sim_co2 > 700.0)
+		sim_co2 = 700.0;
+
+	/* Pressure: slow downward drift, clamp [1000.0, 1015.0]. */
+	sim_pressure += drift_press[i];
+	if (sim_pressure < 1000.0)
+		sim_pressure = 1000.0;
+	if (sim_pressure > 1015.0)
+		sim_pressure = 1015.0;
 
 	drift_idx++;
 
-	p->temperature_c_x100 = sim_temp_x100;
-	p->humidity_rh_x100 = sim_rh_x100;
-	p->pressure_pa = sim_press_pa;
+	p->battery     = sim_battery;
+	p->temperature = sim_temp;
+	p->humidity    = sim_humidity;
+	p->co2         = sim_co2;
+	p->pressure    = sim_pressure;
 
-	int64_t ts = 0;
-	date_time_now(&ts);
-	p->timestamp_ms = ts;
-	p->sequence = seq_num++;
+	seq_num++;
 }
 
 /* ------------------------------------------------------------------ */
@@ -327,79 +356,61 @@ static int publish_reading(const struct sensor_payload *p)
 	size_t raw_len = sizeof(*p);
 
 	/*
-	 * v1.3.1 encode_multi: shared 10B header + per-channel adaptive encoding.
-	 * name_id now serialized as u8 (1B/channel, was 2B in v1.3.0).
-	 * P1-P4 channels included; P5 (Disposable) updates context only.
+	 * v1.3.5 fixed-channel encode: compact header (marker + seq + ctx_ver +
+	 * bitmap) followed by per-channel Repeated/Delta8/Delta16/Raw32. No
+	 * source_ids, priorities, or timestamps — channel count is agreed
+	 * out-of-band (ALEC_N_CHANNELS). Fallback to raw struct if encoded
+	 * output exceeds the 11-byte LoRaWAN ceiling.
 	 */
 
 	double values[ALEC_N_CHANNELS];
-	values[0] = (double)p->temperature_c_x100;
-	values[1] = (double)p->humidity_rh_x100;
-	values[2] = (double)p->pressure_pa;
-	values[3] = (double)p->timestamp_ms;
-	values[4] = (double)p->sequence;
+	values[0] = p->battery;
+	values[1] = p->temperature;
+	values[2] = p->humidity;
+	values[3] = p->co2;
+	values[4] = p->pressure;
 
-	static const char *source_ids[ALEC_N_CHANNELS] = {
-		"temp", "rh", "press", "ts", "seq"};
-
-	/* All P3 (Normal) — let ALEC classify naturally */
-	static const uint8_t priorities[ALEC_N_CHANNELS] = {3, 3, 3, 3, 3};
-
-	/* Shared timestamp for all channels */
-	uint64_t timestamps[ALEC_N_CHANNELS];
-	for (int i = 0; i < ALEC_N_CHANNELS; i++)
-	{
-		timestamps[i] = (uint64_t)p->timestamp_ms;
-	}
-
-	uint8_t compressed[ALEC_OUTPUT_CAP];
+	uint8_t compressed[32];
 	size_t compressed_len = 0;
 
-	AlecResult rc = alec_encode_multi(
+	AlecResult rc = alec_encode_multi_fixed(
 		alec_enc,
 		values, ALEC_N_CHANNELS,
-		timestamps,
-		source_ids,
-		priorities,
 		compressed, sizeof(compressed),
 		&compressed_len);
 
+	bool used_alec = false;
+	if (rc == ALEC_OK && compressed_len > 0 && compressed_len <= 11)
+	{
+		used_alec = true;
+	}
+
+	LOG_INF("────────────────────────────────────");
+	LOG_INF("ALEC v1.3.5  seq=%-4u  "
+			"bat=%.0f%%  t=%.1f°C  "
+			"rh=%.1f%%  co2=%.0fppm  p=%.1fhPa",
+			seq_num,
+			p->battery, p->temperature,
+			p->humidity, p->co2, p->pressure);
 	if (rc == ALEC_OK && compressed_len > 0)
 	{
-		/* Compute equivalent JSON size for reference:
-		 * {"t":XX.XX,"rh":YY.YY,"p":PPPPPP,"ts":TTTTTTTTTTTTT,"seq":SSS}
-		 */
-		char json_buf[96];
-		int json_len = snprintf(json_buf, sizeof(json_buf),
-								"{\"t\":%.2f,\"rh\":%.2f,\"p\":%u,\"ts\":%lld,\"seq\":%u}",
-								(double)p->temperature_c_x100 / 100.0,
-								(double)p->humidity_rh_x100 / 100.0,
-								(unsigned)p->pressure_pa,
-								(long long)p->timestamp_ms,
-								(unsigned)p->sequence);
-		if (json_len < 0)
-		{
-			json_len = 0;
-		}
+		LOG_INF("  Frame marker  : 0x%02X (%s)",
+				compressed[0],
+				compressed[0] == 0xA2 ? "KEYFRAME" : "data");
+	}
+	else
+	{
+		LOG_WRN("  ALEC encode failed: %s (rc=%d)",
+				alec_result_to_string(rc), (int)rc);
+	}
+	LOG_INF("  Raw   struct  : %u B", (unsigned)raw_len);
+	LOG_INF("  ALEC output   : %u B (%s)",
+			(unsigned)compressed_len,
+			used_alec ? "ALEC" : "fallback TLV>11B");
+	LOG_INF("────────────────────────────────────");
 
-		double vs_raw = 100.0 * (1.0 - (double)compressed_len / (double)raw_len);
-		double vs_json = 100.0 * (1.0 - (double)compressed_len / (double)json_len);
-
-		LOG_INF("────────────────────────────────────");
-		LOG_INF("ALEC v1.3.1  seq=%-4u  t=%.2f°C  rh=%.2f%%  p=%u Pa",
-				p->sequence,
-				(double)p->temperature_c_x100 / 100.0,
-				(double)p->humidity_rh_x100 / 100.0,
-				(unsigned)p->pressure_pa);
-		LOG_INF("  JSON  equiv : %d B", json_len);
-		LOG_INF("  Raw   struct: %u B", (unsigned)raw_len);
-		LOG_INF("  ALEC  output: %u B", (unsigned)compressed_len);
-		LOG_INF("  Saved vs JSON  : %.0f%%  (%d B → %u B)",
-				vs_json, json_len, (unsigned)compressed_len);
-		LOG_INF("  Saved vs raw   : %.0f%%  (%u B → %u B)",
-				vs_raw, (unsigned)raw_len, (unsigned)compressed_len);
-		LOG_INF("────────────────────────────────────");
-
+	if (used_alec)
+	{
 		err = mqtt_pub(MQTT_TOPIC_DEMO, compressed, compressed_len,
 					   seq_num * 2);
 		if (err)
@@ -410,8 +421,13 @@ static int publish_reading(const struct sensor_payload *p)
 	}
 	else
 	{
-		LOG_WRN("ALEC encode failed (%s) — sending raw only",
-				alec_result_to_string(rc));
+		LOG_WRN("fallback: frame exceeded 11B, sent raw");
+		err = mqtt_pub(MQTT_TOPIC_DEMO, raw, raw_len, seq_num * 2);
+		if (err)
+		{
+			LOG_ERR("Publish fallback raw failed: %d", err);
+			return err;
+		}
 	}
 
 	/* Always publish raw struct for comparison */
@@ -448,11 +464,18 @@ int main(void)
 
 	/* 0. ALEC encoder — diagnostic */
 	LOG_INF("Heap pool size: %d bytes", CONFIG_HEAP_MEM_POOL_SIZE);
-	LOG_INF("Calling alec_encoder_new()...");
+	LOG_INF("Calling alec_encoder_new_with_config()...");
 
-	alec_enc = alec_encoder_new();
+	AlecEncoderConfig alec_cfg = {
+		.history_size      = 20,
+		.max_patterns      = 256,
+		.max_memory_bytes  = 2048,
+		.keyframe_interval = 50,
+		.smart_resync      = true,
+	};
+	alec_enc = alec_encoder_new_with_config(&alec_cfg);
 
-	LOG_INF("alec_encoder_new returned: %p", (void *)alec_enc);
+	LOG_INF("alec_encoder_new_with_config returned: %p", (void *)alec_enc);
 
 	if (!alec_enc)
 	{
@@ -464,23 +487,24 @@ int main(void)
 
 	LOG_INF("ALEC encoder initialised OK");
 
-	/* Self-test: encode one value to verify encoder is functional */
+	/* Self-test: fixed-channel encode to verify encoder is functional */
 	{
+		double test_vals[ALEC_N_CHANNELS] = {
+			100.0, 26.9, 58.5, 641.0, 1007.7};
 		uint8_t test_out[32];
 		size_t test_len = 0;
-		AlecResult test_rc = alec_encode_value(alec_enc,
-											   1.0,	 /* value (double) */
-											   0ULL, /* timestamp */
-											   NULL, /* source_id */
-											   test_out, sizeof(test_out),
-											   &test_len);
+		AlecResult test_rc = alec_encode_multi_fixed(
+			alec_enc,
+			test_vals, ALEC_N_CHANNELS,
+			test_out, sizeof(test_out),
+			&test_len);
 		if (test_rc != ALEC_OK)
 		{
-			LOG_ERR("ALEC self-test failed: %s (rc=%d)",
-					alec_result_to_string(test_rc), (int)test_rc);
+			LOG_ERR("ALEC self-test failed: rc=%d", (int)test_rc);
 			return -ENOMEM;
 		}
-		LOG_INF("ALEC self-test OK: 8B -> %uB", (unsigned)test_len);
+		LOG_INF("ALEC self-test OK: %uB output, marker=0x%02X",
+				(unsigned)test_len, test_out[0]);
 	}
 
 	/* 1. LTE */
