@@ -1,6 +1,6 @@
 # ALEC FFI static library integration for Zephyr
 #
-# Pre-built libalec_ffi.a (thumbv8m.main-none-eabihf, alec-ffi v1.2.1 bare-metal)
+# Pre-built libalec_ffi.a (thumbv8m.main-none-eabi, alec-ffi v1.3.5 zephyr feature)
 # Critical section symbols provided by firmware/src/critical_section.c (Zephyr irq_lock)
 
 add_library(alec_ffi STATIC IMPORTED GLOBAL)

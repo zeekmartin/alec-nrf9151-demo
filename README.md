@@ -4,20 +4,20 @@ A live demonstration of [ALEC](https://alec-codec.com) streaming compression on 
 
 This project shows that per-message payload compression can reduce IoT data transmission by **80–95%** on constrained cellular networks — with zero added power draw on the device.
 
-> **Status**: Firmware boots and initialises successfully (alec-ffi 1.2.3 confirmed on-device). NB-IoT connectivity pending SIM activation.
+> **Status**: Live on NB-IoT. alec-ffi v1.3.5 validated on-device. Compact fixed-channel mode active — steady-state payload ~11B for 5 channels.
 
 ---
 
 ## What This Demo Does
 
-A Nordic nRF9151 SMA-DK board sends simulated sensor telemetry (temperature, humidity, pressure, timestamp) over NB-IoT every 60 seconds. Each payload is compressed with the ALEC encoder before transmission. A backend server receives, decodes, and forwards metrics to a Grafana dashboard showing real-time compression performance.
+A Nordic nRF9151 SMA-DK board sends a simulated 5-channel sensor reading (battery, temperature, humidity, CO2, pressure) over NB-IoT every 5 seconds. Each payload is compressed with the ALEC encoder before transmission. A backend server receives, decodes, and forwards metrics to a Grafana dashboard showing real-time compression performance.
 
 ```
 nRF9151 (NB-IoT)
   └─ Sensor data (simulated)
-  └─ ALEC Encoder (alec-ffi 1.2.3, zephyr feature)
+  └─ ALEC Encoder (alec-ffi 1.3.5, zephyr feature)
   └─ Compressed payload → NB-IoT → MQTT broker
-                                        └─ ALEC Decoder (Rust, alec 1.2.3)
+                                        └─ ALEC Decoder (Rust, alec 1.3.5)
                                         └─ Prometheus bridge
                                         └─ Grafana dashboard
 ```
@@ -47,14 +47,14 @@ alec-nrf9151-demo/
 │   │   └── critical_section.c # Zephyr irq_lock shim for alec-ffi
 │   ├── lib/
 │   │   └── alec/
-│   │       ├── libalec_ffi.a   # Pre-built: alec-ffi 1.2.3 (thumbv8m.main-none-eabi)
+│   │       ├── libalec_ffi.a   # Pre-built: alec-ffi 1.3.5 (thumbv8m.main-none-eabi)
 │   │       ├── include/
 │   │       │   └── alec.h      # C FFI declarations
 │   │       └── CMakeLists.txt
 │   ├── CMakeLists.txt
 │   └── prj.conf
 ├── backend/                    # MQTT broker + ALEC decoder + Prometheus bridge
-│   ├── decoder/                # Rust: alec 1.2.3 decoder + Prometheus metrics
+│   ├── decoder/                # Rust: alec 1.3.5 decoder + Prometheus metrics
 │   └── docker-compose.yml      # mosquitto + decoder + prometheus + grafana
 └── README.md
 ```
@@ -66,9 +66,9 @@ alec-nrf9151-demo/
 | Layer | Technology |
 |---|---|
 | Device firmware | Zephyr RTOS / nRF Connect SDK v2.9.2 |
-| Compression (device) | alec-ffi 1.2.3 (`zephyr` feature) |
+| Compression (device) | alec-ffi 1.3.5 (`zephyr` feature) |
 | Transport | NB-IoT → MQTT |
-| Compression (server) | alec 1.2.3 Rust decoder |
+| Compression (server) | alec 1.3.5 Rust decoder |
 | Metrics | Prometheus |
 | Dashboard | Grafana |
 | Local dev | Docker Desktop (Windows) |
@@ -77,34 +77,52 @@ alec-nrf9151-demo/
 
 ## Demo Payload
 
-Simulated IoT sensor payload sent every 60 seconds:
+Simulated EM500-CO2 profile sent every 5 seconds:
 
-| Field | Type | Raw size |
+| Channel | Type | Range |
 |---|---|---|
-| Temperature | int16 (°C × 100) | 2 bytes |
-| Humidity | uint16 (%RH × 100) | 2 bytes |
-| Pressure | uint32 (Pa) | 4 bytes |
-| Timestamp | int64 (ms epoch) | 8 bytes |
-| Sequence counter | uint32 | 4 bytes |
-| **Total** | | **20 bytes** |
+| Battery | double (%) | 100.0 (constant) |
+| Temperature | double (°C) | 24.0 – 27.0 |
+| Humidity | double (%RH) | 55.0 – 65.0 |
+| CO2 | double (ppm) | 400.0 – 700.0 |
+| Pressure | double (hPa) | 1000.0 – 1015.0 |
 
-Expected compressed size with ALEC: **2–4 bytes** (~80–90% reduction).
+**Wire format (ALEC v1.3.5 compact fixed-channel):**
+
+| Message | Marker | Size | Notes |
+|---|---|---|---|
+| #1 (cold start) | 0xA2 | 27B → fallback | Raw32 all channels |
+| #2–7 (convergence) | 0xA1 | 11–15B → fallback | Context building |
+| #8+ (steady state) | 0xA1 | ~11B | Delta8 dominant |
+| #50, #100… (keyframe) | 0xA2 | 27B → fallback | Periodic resync |
+
+Fallback rule: if encoded output > 11B, raw struct sent to `alec/sensor/demo` instead.
 
 MQTT topics:
-- `alec/sensor/demo` — ALEC-compressed payload
-- `alec/sensor/raw` — uncompressed raw struct (for comparison)
+- `alec/sensor/demo` — ALEC frame or raw fallback
+- `alec/sensor/raw` — uncompressed raw (always sent)
 
 ---
 
 ## Building libalec_ffi.a
 
-The pre-built `libalec_ffi.a` in `firmware/lib/alec/` targets `thumbv8m.main-none-eabi` with the `zephyr` feature (alec-ffi 1.2.3). To rebuild:
+The pre-built `libalec_ffi.a` in `firmware/lib/alec/` targets `thumbv8m.main-none-eabi` with the `zephyr` feature (alec-ffi 1.3.5). To rebuild:
 
 ```bash
 # In the alec-codec repository
 rustup target add thumbv8m.main-none-eabi
 cd alec-ffi
-cargo build --release --target thumbv8m.main-none-eabi --no-default-features --features zephyr
+
+# For Zephyr targets (nRF9151):
+cargo build --release \
+  --target thumbv8m.main-none-eabi \
+  --no-default-features --features zephyr
+
+# For bare-metal targets (no OS):
+cargo build --release \
+  --target thumbv8m.main-none-eabi \
+  --no-default-features --features bare-metal
+
 cp ../target/thumbv8m.main-none-eabi/release/libalec_ffi.a \
    /path/to/alec-nrf9151-demo/firmware/lib/alec/
 ```
@@ -136,10 +154,16 @@ cp ../target/thumbv8m.main-none-eabi/release/libalec_ffi.a \
 
 ```
 *** Booting nRF Connect SDK v2.9.2 ***
-[00:00:03] <inf> alec_demo: ALEC NB-IoT Sensor Demo starting (alec-ffi 1.2.3)
-[00:00:03] <inf> alec_demo: Initialising modem library...
-[00:00:03] <inf> alec_demo: Connecting to LTE network (NB-IoT preferred)...
-[00:00:xx] <inf> alec_demo: LTE registered
+[00:00:03] <inf> alec_demo: ALEC NB-IoT Sensor Demo starting (alec-ffi 1.3.5)
+[00:00:03] <inf> alec_demo: Heap pool size: 98304 bytes
+[00:00:03] <inf> alec_demo: ALEC self-test OK: 27B output, marker=0xA2
+[00:00:03] <inf> alec_demo: LTE registered
+[00:00:xx] <inf> alec_demo: MQTT connected
+[00:00:xx] <inf> alec_demo: ────────────────────────
+[00:00:xx] <inf> alec_demo: ALEC v1.3.5  seq=0  bat=100%  t=26.9°C  rh=58.5%  co2=641ppm  p=1007.7hPa
+[00:00:xx] <inf> alec_demo:   Frame marker : 0xA2 (KEYFRAME)
+[00:00:xx] <inf> alec_demo:   ALEC output  : 27B (fallback)
+[00:00:xx] <wrn> alec_demo:   fallback: frame exceeded 11B, sent raw
 ```
 
 ---
@@ -160,6 +184,18 @@ docker compose up
 ## Integration Notes — alec-ffi on Zephyr
 
 This project drove several improvements to alec-ffi that are now part of the official releases:
+
+### alec-ffi 1.3.5 — Compact fixed-channel mode ✅
+
+New in this release:
+- `alec_encoder_new_with_config()` — configurable `history_size`, `keyframe_interval`, `smart_resync`
+- `alec_encode_multi_fixed()` — positional encoding, no name_ids, no timestamps, 4B header + 2B bitmap
+- Wire format: `0xA1` (data) / `0xA2` (keyframe)
+- Packet loss recovery: periodic keyframe (default N=50) + sequence gap detection + `reset_to_baseline()`
+- LoRaWAN downlink smart resync: `0xFF` command via `alec_downlink_handler()` — worst-case drift reduced from N×interval to 1×interval
+- Context persistence: `alec_decoder_export_state()` / `alec_decoder_import_state()` — ALCS binary format, ~1.5KB per context, CRC32 verified
+- Multi-arch verified: M3 / M4 / M4F / M0+
+- Fallback: if encoded output > 11B → caller sends raw payload (no silent corruption)
 
 ### alec-ffi 1.2.0 — no_std support
 Initial no_std port. Replaces `thiserror` with manual error handling, `crc32fast` with `crc` v3 (no_std compatible). Enables embedded targets in principle but requires allocator and panic handler.
